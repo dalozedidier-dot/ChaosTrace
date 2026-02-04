@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 from __future__ import annotations
 
 import argparse
@@ -7,115 +6,163 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-def brownian(rng: np.random.Generator, n: int, sigma: float) -> np.ndarray:
-    return rng.normal(0.0, sigma, size=n).cumsum()
 
-def generate(
-    n: int,
-    hz: float,
-    seed: int,
-    foil_drop_prob_per_s: float,
-    drop_threshold: float = 0.30,
-    wind_shear_sigma: float = 0.35,
-    wave_sigma: float = 0.04,
-    foil_brown_sigma: float = 0.003,
-) -> pd.DataFrame:
-    rng = np.random.default_rng(seed)
-    t = np.arange(n) / hz
+def _random_walk(rng: np.random.Generator, n: int, step_sd: float) -> np.ndarray:
+    steps = rng.normal(0.0, step_sd, size=n)
+    return np.cumsum(steps)
 
-    # Wind: base + sinus + cumulative shear (random walk) + gust noise
-    base_wind = 12.0 + 1.8 * np.sin(2 * np.pi * t / 120.0)
-    shear = brownian(rng, n, sigma=wind_shear_sigma) / max(n, 1)
-    gust = rng.normal(0.0, 0.25, size=n)
-    wind_speed = base_wind + shear + gust
 
-    wind_angle = 30.0 + 10.0 * np.sin(2 * np.pi * t / 60.0) + rng.normal(0.0, 0.7, size=n)
+def _wave_field(rng: np.random.Generator, t: np.ndarray) -> np.ndarray:
+    # Stochastic waves: sum of sinusoids + noise
+    f1 = rng.uniform(0.05, 0.12)
+    f2 = rng.uniform(0.12, 0.25)
+    p1 = rng.uniform(0.0, 2 * np.pi)
+    p2 = rng.uniform(0.0, 2 * np.pi)
+    a1 = rng.uniform(0.10, 0.25)
+    a2 = rng.uniform(0.05, 0.18)
+    w = a1 * np.sin(2 * np.pi * f1 * t + p1) + a2 * np.sin(2 * np.pi * f2 * t + p2)
+    w += rng.normal(0.0, 0.03, size=t.size)
+    return w
 
-    # Boat speed coupled to wind + low frequency oscillations + sensor noise
-    boat_speed = 34.0 + 4.5 * np.sin(2 * np.pi * t / 40.0) + 0.25 * wind_speed + rng.normal(0.0, 0.35, size=n)
 
-    # Foil dynamics: baseline + waves (sinus + stochastic) + brownian on change
-    wave = wave_sigma * (np.sin(2 * np.pi * t / 2.8) + 0.6 * np.sin(2 * np.pi * t / 1.4))
-    foil_rw = brownian(rng, n, sigma=foil_brown_sigma) / max(hz, 1.0)
-    foil_height = 0.85 + 0.06 * np.sin(2 * np.pi * t / 25.0) + wave + foil_rw + rng.normal(0.0, 0.012, size=n)
+def _inject_drops(
+    rng: np.random.Generator,
+    t: np.ndarray,
+    base_foil: np.ndarray,
+    profile: str,
+    drop_threshold: float,
+    burn_in_s: float = 30.0,
+) -> np.ndarray:
+    """
+    Create clear low-foil segments so Markov + drop detectors have something to chew on.
+    """
+    foil = base_foil.copy()
 
-    # Inject drop events (prob per second -> prob per sample)
-    p_sample = np.clip(foil_drop_prob_per_s / hz, 0.0, 0.25)
-    i = 0
-    while i < n:
-        if rng.random() < p_sample:
-            drop_len = int(rng.integers(int(0.25 * hz), int(1.2 * hz) + 1))
-            drop_len = max(drop_len, 2)
-            end = min(n, i + drop_len)
+    duration = float(t[-1] - t[0]) if t.size else 0.0
 
-            # ramp down to below threshold, then noisy floor, then exponential recovery
-            ramp = np.linspace(0.0, 0.75, end - i)
-            foil_height[i:end] -= ramp
+    burn_in_s = float(max(0.0, burn_in_s))
+    burn_in_t = float(t[0] + burn_in_s)
 
-            floor = drop_threshold * rng.uniform(0.4, 0.9)
-            foil_height[i:end] = np.minimum(foil_height[i:end], floor + rng.normal(0.0, 0.01, size=end - i))
+    if profile == "stable":
+        return foil
 
-            rec_len = int(rng.integers(int(0.3 * hz), int(1.5 * hz) + 1))
-            rec_end = min(n, end + rec_len)
-            if rec_end > end:
-                tau = rng.uniform(0.4, 1.4)
-                x = np.linspace(0.0, 3.0, rec_end - end)
-                foil_height[end:rec_end] += 0.18 * np.exp(-x / tau)
+    if profile == "1_2_drops":
+        ndrops = int(rng.integers(1, 3))
+        t_start = max(burn_in_s, 0.15 * duration)
+        times = rng.uniform(t_start, 0.85 * duration, size=ndrops)
+        times.sort()
+        for tc in times:
+            depth = rng.uniform(0.02, 0.08)  # deep enough under typical thresholds
+            width = rng.uniform(1.0, 2.5)    # seconds
+            # Smooth drop: Gaussian dip
+            foil -= (rng.uniform(0.35, 0.55)) * np.exp(-0.5 * ((t - tc) / (width / 2.0)) ** 2)
+            # Clamp below threshold for a short plateau near center
+            mask = np.abs(t - tc) < (0.25 * width)
+            foil[mask] = np.minimum(foil[mask], depth)
+        return np.clip(foil, 0.0, 1.0)
 
-            i = rec_end
-        else:
-            i += 1
+    # chaotic: many drops + regime shifts
+    # Create a time-varying hazard that increases in "bad" periods
+    hazard = 0.0005 + 0.0015 * (np.sin(2 * np.pi * t / max(1.0, duration)) ** 2)
+    hazard += 0.0005 * (rng.random(size=t.size))
+    events = (rng.random(size=t.size) < hazard) & (t >= burn_in_t)
 
-    foil_height = np.clip(foil_height, 0.05, 1.2)
+    idxs = np.where(events)[0]
+    for i in idxs:
+        tc = float(t[i])
+        width = float(rng.uniform(0.4, 1.8))
+        depth = float(rng.uniform(0.01, 0.10))
+        foil -= float(rng.uniform(0.25, 0.60)) * np.exp(-0.5 * ((t - tc) / (width / 2.0)) ** 2)
+        mask = np.abs(t - tc) < (0.20 * width)
+        foil[mask] = np.minimum(foil[mask], depth)
 
-    foil_rake = 4.0 + 0.6 * np.sin(2 * np.pi * t / 33.0) + rng.normal(0.0, 0.06, size=n)
-    dagger = 1.8 + 0.22 * np.sin(2 * np.pi * t / 45.0) + rng.normal(0.0, 0.03, size=n)
-    heading = (90.0 + 15.0 * np.sin(2 * np.pi * t / 200.0) + rng.normal(0.0, 0.25, size=n)) % 360.0
-    vmg = boat_speed * np.cos(np.deg2rad(wind_angle)) + rng.normal(0.0, 0.25, size=n)
+    # Add a few longer regime dips
+    for _ in range(int(rng.integers(1, 4))):
+        tc = float(rng.uniform(max(burn_in_s, 0.2 * duration), 0.8 * duration))
+        width = float(rng.uniform(3.0, 8.0))
+        foil -= float(rng.uniform(0.05, 0.20)) * np.exp(-0.5 * ((t - tc) / (width / 2.0)) ** 2)
 
-    # Pitch/Roll: waves + noise (more chaotic when foil close to threshold)
-    instab = np.clip((drop_threshold + 0.05 - foil_height) / (drop_threshold + 0.05), 0.0, 1.0)
-    pitch = 2.0 + 0.9 * np.sin(2 * np.pi * t / 15.0) + wave_sigma * 2.0 * rng.normal(0.0, 1.0, size=n) + 0.6 * instab * rng.normal(0.0, 1.0, size=n)
-    roll = 1.0 + 0.7 * np.sin(2 * np.pi * t / 12.0) + wave_sigma * 2.0 * rng.normal(0.0, 1.0, size=n) + 0.5 * instab * rng.normal(0.0, 1.0, size=n)
+    foil = np.clip(foil, 0.0, 1.0)
+    return foil
 
-    return pd.DataFrame({
-        "time_s": t,
-        "boat_speed": boat_speed,
-        "heading_deg": heading,
-        "wind_speed": wind_speed,
-        "wind_angle_deg": wind_angle,
-        "foil_height_m": foil_height,
-        "foil_rake_deg": foil_rake,
-        "daggerboard_depth_m": dagger,
-        "vmg": vmg,
-        "pitch_deg": pitch,
-        "roll_deg": roll,
-    })
+
+def generate_sailgp_synth(
+    out_csv: Path,
+    profile: str,
+    duration_s: float = 120.0,
+    hz: float = 20.0,
+    seed: int = 7,
+    drop_threshold: float = 0.20,
+) -> None:
+    rng = np.random.default_rng(int(seed))
+
+    n = int(round(duration_s * hz))
+    n = max(100, n)
+    t = np.arange(n, dtype=float) / float(hz)
+
+    # Wind shear: cumulative random walk, plus slow drift
+    wind_shear = _random_walk(rng, n, step_sd=0.02)
+    wind_shear += 0.2 * np.sin(2 * np.pi * t / max(30.0, duration_s))
+
+    # Waves
+    waves = _wave_field(rng, t)
+
+    # Base foil: stable hover around ~0.6 with disturbances (wind + waves)
+    foil = 0.60 + 0.10 * np.tanh(0.8 * wind_shear) + 0.08 * waves
+    foil += rng.normal(0.0, 0.01, size=n)
+
+    foil = _inject_drops(rng, t, foil, profile=profile, drop_threshold=drop_threshold, burn_in_s=30.0)
+
+    # Brownian-like perturbation on foil dynamics for chaotic profile
+    if profile == "chaotic":
+        foil += 0.015 * _random_walk(rng, n, step_sd=0.06)
+        foil = np.clip(foil, 0.0, 1.0)
+
+    # Boat speed: anti-correlated with bad foil + wind/waves
+    base_speed = 38.0 + 2.5 * np.tanh(0.6 * wind_shear) - 6.0 * (foil < drop_threshold).astype(float)
+    base_speed += 1.5 * waves
+    base_speed += rng.normal(0.0, 0.25, size=n)
+
+    # Add recovery inertia: smooth speed with a low-pass filter
+    speed = base_speed.copy()
+    alpha = 0.08 if profile != "stable" else 0.05
+    for i in range(1, n):
+        speed[i] = (1 - alpha) * speed[i - 1] + alpha * speed[i]
+
+    df = pd.DataFrame(
+        {
+            "time_s": t,
+            "foil_height_m": foil.astype(float),
+            "boat_speed": speed.astype(float),
+            "wind_shear": wind_shear.astype(float),
+            "wave_height": waves.astype(float),
+        }
+    )
+
+    out_csv.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(out_csv, index=False)
+
 
 def main() -> int:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--out-dir", required=True)
-    ap.add_argument("--seconds", type=float, default=120.0)
-    ap.add_argument("--hz", type=float, default=20.0)
-    ap.add_argument("--drop-threshold", type=float, default=0.30)
-    args = ap.parse_args()
+    p = argparse.ArgumentParser(prog="generate_sailgp_synth")
+    p.add_argument("--out", required=True, help="Output CSV path")
+    p.add_argument("--profile", choices=["stable", "1_2_drops", "chaotic"], default="stable")
+    p.add_argument("--duration-s", type=float, default=120.0)
+    p.add_argument("--hz", type=float, default=20.0)
+    p.add_argument("--seed", type=int, default=7)
+    p.add_argument("--drop-threshold", type=float, default=0.20)
+    args = p.parse_args()
 
-    out = Path(args.out_dir)
-    out.mkdir(parents=True, exist_ok=True)
-
-    n = int(args.seconds * args.hz)
-
-    # 3 regimes by seed/prob
-    stable = generate(n, args.hz, seed=7,  foil_drop_prob_per_s=0.00, drop_threshold=args.drop_threshold)
-    one_two = generate(n, args.hz, seed=42, foil_drop_prob_per_s=0.02, drop_threshold=args.drop_threshold)
-    chaotic = generate(n, args.hz, seed=1337, foil_drop_prob_per_s=0.05, drop_threshold=args.drop_threshold)
-
-    stable.to_csv(out / "sample_timeseries_stable.csv", index=False)
-    one_two.to_csv(out / "sample_timeseries_1_2_drops.csv", index=False)
-    chaotic.to_csv(out / "sample_timeseries_chaotic.csv", index=False)
-
-    print(f"Wrote 3 files to: {out}")
+    generate_sailgp_synth(
+        out_csv=Path(args.out),
+        profile=str(args.profile),
+        duration_s=float(args.duration_s),
+        hz=float(args.hz),
+        seed=int(args.seed),
+        drop_threshold=float(args.drop_threshold),
+    )
     return 0
+
 
 if __name__ == "__main__":
     raise SystemExit(main())
