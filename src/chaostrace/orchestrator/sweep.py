@@ -56,7 +56,7 @@ def _sigmoid01(x: np.ndarray, k: float = 4.0) -> np.ndarray:
 def _safe_rolling_std(x: np.ndarray, win: int) -> np.ndarray:
     s = pd.Series(x)
     r = s.rolling(win, min_periods=max(2, win // 3)).std()
-    out = r.to_numpy(dtype=float)
+    out = r.to_numpy(dtype=float).copy()  # IMPORTANT: ensure writable
     out[~np.isfinite(out)] = 0.0
     return out
 
@@ -64,7 +64,7 @@ def _safe_rolling_std(x: np.ndarray, win: int) -> np.ndarray:
 def _safe_rolling_mean(x: np.ndarray, win: int) -> np.ndarray:
     s = pd.Series(x)
     r = s.rolling(win, min_periods=max(2, win // 3)).mean()
-    out = r.to_numpy(dtype=float)
+    out = r.to_numpy(dtype=float).copy()  # IMPORTANT: ensure writable
     out[~np.isfinite(out)] = 0.0
     return out
 
@@ -86,7 +86,7 @@ def _rqa_light_score(series: np.ndarray, emb_dim: int, emb_lag: int, win: int) -
     Uses embedding novelty: distance between successive embedded vectors.
     Returns a 0..1 score series.
     """
-    x = np.asarray(series, dtype=float)
+    x = np.asarray(series, dtype=float).copy()
     x[np.isnan(x)] = 0.0
 
     d = max(2, int(emb_dim))
@@ -96,12 +96,12 @@ def _rqa_light_score(series: np.ndarray, emb_dim: int, emb_lag: int, win: int) -
     if x.size < needed:
         return np.zeros_like(x, dtype=float)
 
-    idx = np.arange(0, d * lag, lag, dtype=int)  # [0, lag, 2lag, ...]
+    idx = np.arange(0, d * lag, lag, dtype=int)
     nvec = x.size - idx[-1]
-    emb = np.stack([x[i : i + nvec] for i in idx], axis=1)  # (nvec, d)
+    emb = np.stack([x[i : i + nvec] for i in idx], axis=1)
 
     diff = np.diff(emb, axis=0)
-    novelty = np.linalg.norm(diff, axis=1)  # (nvec-1,)
+    novelty = np.linalg.norm(diff, axis=1)
     novelty_full = np.zeros_like(x, dtype=float)
     start = idx[-1] + 1
     novelty_full[start : start + novelty.size] = novelty
@@ -112,15 +112,10 @@ def _rqa_light_score(series: np.ndarray, emb_dim: int, emb_lag: int, win: int) -
 
 
 def _markov_metrics(low_state: np.ndarray) -> tuple[float, float, float, int]:
-    """
-    Compute p01, p10, p_low and unique_edges on a small multi-state graph
-    built from (foil_state, speed_bin) to allow non-trivial edge counts.
-    """
     s = np.asarray(low_state, dtype=int)
     if s.size < 2:
         return 0.0, 0.0, float(np.mean(s) if s.size else 0.0), 0
 
-    # Binary transitions for p01/p10
     a = s[:-1]
     b = s[1:]
     n0 = int(np.sum(a == 0))
@@ -129,8 +124,6 @@ def _markov_metrics(low_state: np.ndarray) -> tuple[float, float, float, int]:
     p10 = float(np.sum((a == 1) & (b == 0)) / n1) if n1 > 0 else 0.0
     p_low = float(np.mean(s))
 
-    # Unique edges on a 6-state graph: foil(0/1) x speed_bin(0/1/2) computed upstream if provided
-    # Here we just default to binary edges count when no extra state is provided.
     unique_edges = int(len({(int(x), int(y)) for x, y in zip(a, b)}))
     return p01, p10, p_low, unique_edges
 
@@ -140,11 +133,6 @@ def _component_scores(
     cfg: SweepConfig,
     hz: float,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """
-    Compute component score series and per-run metrics.
-    Returns:
-      metrics_row_df (1 row) and timeline_df (time_s, score_mean, component scores)
-    """
     if "time_s" not in df.columns:
         raise ValueError("Missing required column: time_s")
 
@@ -159,7 +147,6 @@ def _component_scores(
         foil = df[foil_col].to_numpy(dtype=float)
 
     if speed_col is None:
-        # Fallback: pick first numeric column other than time_s
         numeric_cols = [
             c
             for c in df.columns
@@ -171,28 +158,29 @@ def _component_scores(
         speed = df[speed_col].to_numpy(dtype=float)
 
     win = max(5, int(round(cfg.window_s * hz)))
-    win = min(win, max(5, df.shape[0] // 3))  # keep reasonable
+    win = min(win, max(5, df.shape[0] // 3))
 
-    # Derivatives
     dt = np.gradient(time_s)
-    dt[~np.isfinite(dt) | (dt <= 0)] = np.nanmedian(dt[np.isfinite(dt) & (dt > 0)]) if np.any(np.isfinite(dt) & (dt > 0)) else 1.0
+    dt_mask = (~np.isfinite(dt)) | (dt <= 0)
+    if np.any(dt_mask):
+        good = dt[np.isfinite(dt) & (dt > 0)]
+        fill = float(np.nanmedian(good)) if good.size else 1.0
+        dt = dt.copy()
+        dt[dt_mask] = fill
 
     d_speed = np.gradient(speed) / dt
     d_foil = np.gradient(foil) / dt
 
-    # Component 1: null_trace proxy (rolling variability)
     v_std = _safe_rolling_std(speed, win)
     f_std = _safe_rolling_std(foil, win)
     null_raw = 0.6 * _zscore(v_std) + 0.4 * _zscore(f_std)
     null_trace = _sigmoid01(_safe_rolling_mean(null_raw, win), k=2.2)
 
-    # Component 2: delta_stats proxy (rolling abs derivative)
     ds = np.abs(d_speed)
     dfh = np.abs(d_foil)
     delta_raw = 0.6 * _zscore(ds) + 0.4 * _zscore(dfh)
     delta_stats = _sigmoid01(_safe_rolling_mean(delta_raw, win), k=2.2)
 
-    # Component 3: markov_drop (low foil state + transition activity)
     low_state = (foil < float(cfg.drop_threshold)).astype(int)
     trans = np.abs(np.diff(low_state, prepend=low_state[:1])).astype(float)
     trans_sm = _safe_rolling_mean(trans, win)
@@ -202,10 +190,8 @@ def _component_scores(
 
     p01, p10, p_low, unique_edges = _markov_metrics(low_state)
 
-    # Component 4: rqa_light
     rqa_light = _rqa_light_score(speed, cfg.emb_dim, cfg.emb_lag, win)
 
-    # Weighted score
     score_mean = (
         WEIGHTS["null_trace"] * null_trace
         + WEIGHTS["delta_stats"] * delta_stats
@@ -255,12 +241,6 @@ def _component_scores(
 
 
 def sweep(df: pd.DataFrame, cfgs: list[SweepConfig], seed: int = 0) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """
-    Runs a sweep over a list of configs.
-    Returns:
-      metrics_df: 1 row per run (config)
-      timeline_df: rows = (run_id, time_s, score_mean) + component series
-    """
     if "time_s" not in df.columns:
         raise ValueError("Missing required column: time_s")
 
@@ -268,7 +248,7 @@ def sweep(df: pd.DataFrame, cfgs: list[SweepConfig], seed: int = 0) -> tuple[pd.
     df2 = df2.sort_values("time_s", kind="mergesort").reset_index(drop=True)
 
     hz = estimate_sample_hz(df2["time_s"].to_numpy(dtype=float))
-    _ = np.random.default_rng(int(seed))  # deterministic hook, even if unused
+    _ = np.random.default_rng(int(seed))
 
     metrics_rows: list[pd.DataFrame] = []
     timeline_rows: list[pd.DataFrame] = []
