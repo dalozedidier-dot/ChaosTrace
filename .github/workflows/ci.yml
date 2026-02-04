@@ -17,7 +17,6 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-
       - name: Debug environment
         run: |
           set -euo pipefail
@@ -30,20 +29,16 @@ jobs:
         run: |
           python -m pip install -U pip
           pip install -e ".[dev]"
-
       - name: Lint (ruff)
         run: |
           python -m ruff check .
-
       - name: Tests
         run: |
           python -m pytest --cov=chaostrace --cov-report=term-missing
-
       - name: Smoke sweep
         run: |
           mkdir -p _ci_out/smoke
           python -m chaostrace.cli.run_sweep --input test_data/sample_timeseries.csv --out _ci_out/smoke --runs 3 --seed 7
-
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
