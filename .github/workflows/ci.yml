@@ -21,25 +21,52 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
+      - name: Resolve project dir (find pyproject.toml)
+        id: proj
+        run: |
+          set -euo pipefail
+          echo "PWD=$(pwd)"
+          echo "ROOT CONTENT:"
+          ls -la
+          echo "SEARCH pyproject.toml (maxdepth 6):"
+          find . -maxdepth 6 -name pyproject.toml -print || true
+
+          P="$(find . -maxdepth 6 -name pyproject.toml -print -quit || true)"
+          if [ -z "$P" ]; then
+            echo "ERROR: pyproject.toml not found (maxdepth 6)."
+            exit 2
+          fi
+
+          D="$(dirname "$P")"
+          D="${D#./}"
+          if [ -z "$D" ]; then D="."; fi
+
+          echo "project_dir=$D" >> "$GITHUB_OUTPUT"
+          echo "PROJECT_DIR=$D"
+
       - name: Install deps
         run: |
           set -euo pipefail
+          cd "${{ steps.proj.outputs.project_dir }}"
           python -m pip install -U pip
           pip install -e ".[dev]"
 
       - name: Lint (ruff)
         run: |
           set -euo pipefail
+          cd "${{ steps.proj.outputs.project_dir }}"
           python -m ruff check .
 
       - name: Tests
         run: |
           set -euo pipefail
+          cd "${{ steps.proj.outputs.project_dir }}"
           python -m pytest -q --cov=chaostrace --cov-report=term-missing
 
       - name: Smoke sweep
         run: |
           set -euo pipefail
+          cd "${{ steps.proj.outputs.project_dir }}"
           mkdir -p _ci_out/smoke
           python -m chaostrace.cli.run_sweep \
             --input test_data/sample_timeseries.csv \
@@ -52,4 +79,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ci_out_py${{ matrix.python-version }}
-          path: _ci_out/
+          path: |
+            **/_ci_out/**
