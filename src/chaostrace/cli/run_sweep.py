@@ -1,133 +1,248 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
 
-from ..data.ingest import load_timeseries
-from ..data.synthetic import add_realistic_noise, tiny_perturb
-from ..orchestrator.sweep import SweepConfig, sweep
-from ..utils.manifest import write_manifest
+from chaostrace.orchestrator.sweep import build_grid, sweep
 
-def build_grid(runs: int) -> list[SweepConfig]:
-    # calibrated grid for early instabilities
-    windows = [3.0, 5.0, 10.0, 20.0]
-    thresholds = [0.10, 0.20, 0.30, 0.40]
-    dims = [3, 4, 5]
-    lags = [1, 3, 5, 8, 12]
-    grid: list[SweepConfig] = []
-    for w in windows:
-        for th in thresholds:
-            for d in dims:
-                for lag in lags:
-                    grid.append(SweepConfig(window_s=w, drop_threshold=th, emb_dim=d, emb_lag=lag))
-    return grid[: max(runs, 0)]
 
-def phase_portrait_3d_colored(df: pd.DataFrame, score: pd.Series | None, out_png: Path) -> None:
-    xs = df["boat_speed"].to_numpy(dtype=float)
-    ys = df["foil_height_m"].to_numpy(dtype=float)
-    zs = df["wind_speed"].to_numpy(dtype=float)
+def _parse_list_int(s: str) -> list[int]:
+    return [int(x.strip()) for x in s.split(",") if x.strip()]
 
-    fig = plt.figure(figsize=(8, 6))
-    ax = fig.add_subplot(111, projection="3d")
 
-    if score is None or len(score) != len(df):
-        ax.plot(xs, ys, zs, linewidth=1.0)
-    else:
-        sc = score.to_numpy(dtype=float)
-        hi = sc > 0.20
-        lo = ~hi
-        ax.scatter(xs[lo], ys[lo], zs[lo], s=4)
-        ax.scatter(xs[hi], ys[hi], zs[hi], s=10, c="red")
+def _parse_list_float(s: str) -> list[float]:
+    return [float(x.strip()) for x in s.split(",") if x.strip()]
 
-    ax.set_xlabel("boat_speed")
-    ax.set_ylabel("foil_height_m")
-    ax.set_zlabel("wind_speed")
-    fig.tight_layout()
-    fig.savefig(out_png, dpi=150)
-    plt.close(fig)
 
-def timeline_overlay(df: pd.DataFrame, score: pd.Series | None, out_png: Path) -> None:
-    t = df["time_s"].to_numpy(dtype=float)
-    foil = df["foil_height_m"].to_numpy(dtype=float)
-    spd = df["boat_speed"].to_numpy(dtype=float)
+def _sha256_file(p: Path) -> str:
+    h = hashlib.sha256()
+    with p.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
-    fig, ax1 = plt.subplots(figsize=(10, 4))
-    ax1.plot(t, foil, linewidth=1.0, label="foil_height_m")
+
+def write_manifest(out_dir: Path, params: dict, files: list[Path]) -> Path:
+    manifest = {
+        "params": params,
+        "files": [
+            {
+                "path": str(f.relative_to(out_dir)),
+                "sha256": _sha256_file(f),
+                "bytes": f.stat().st_size,
+            }
+            for f in files
+        ],
+    }
+    out_path = out_dir / "manifest.json"
+    out_path.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
+    return out_path
+
+
+def _best_run_id(metrics_df: pd.DataFrame) -> int:
+    if metrics_df.empty or "score_mean" not in metrics_df.columns:
+        return 1
+    idx = int(metrics_df["score_mean"].astype(float).idxmax())
+    return int(metrics_df.loc[idx, "run_id"])
+
+
+def _timeline_overlay_plot(
+    out_path: Path,
+    df: pd.DataFrame,
+    timeline_df: pd.DataFrame,
+    run_id: int,
+) -> None:
+    import matplotlib.pyplot as plt  # local import for faster CLI start
+
+    sub = timeline_df[timeline_df["run_id"] == run_id].copy()
+    if sub.empty:
+        return
+
+    t = sub["time_s"].to_numpy(dtype=float)
+    score = sub["score_mean"].to_numpy(dtype=float)
+
+    foil_col = "foil_height_m" if "foil_height_m" in df.columns else None
+    speed_col = "boat_speed" if "boat_speed" in df.columns else None
+    if speed_col is None:
+        for c in ["boat_speed_mps", "speed_mps", "speed", "v"]:
+            if c in df.columns:
+                speed_col = c
+                break
+
+    fig = plt.figure()
+    ax1 = fig.add_subplot(111)
+
+    if foil_col and foil_col in df.columns:
+        ax1.plot(df["time_s"].to_numpy(dtype=float), df[foil_col].to_numpy(dtype=float), label=foil_col)
+
+    if speed_col and speed_col in df.columns:
+        ax1.plot(df["time_s"].to_numpy(dtype=float), df[speed_col].to_numpy(dtype=float), label=speed_col)
+
     ax1.set_xlabel("time_s")
-    ax1.set_ylabel("foil_height_m")
+    ax1.set_ylabel("signals")
+    ax1.legend(loc="upper left")
 
     ax2 = ax1.twinx()
-    ax2.plot(t, spd, linewidth=1.0, label="boat_speed")
-    ax2.set_ylabel("boat_speed")
-
-    if score is not None and len(score) == len(df):
-        ax3 = ax1.twinx()
-        ax3.spines["right"].set_position(("axes", 1.12))
-        ax3.plot(t, score.to_numpy(dtype=float), linewidth=1.0, label="score_mean")
-        ax3.set_ylabel("score_mean")
+    ax2.plot(t, score, label="score_mean")
+    ax2.set_ylabel("score_mean")
+    ax2.legend(loc="upper right")
 
     fig.tight_layout()
-    fig.savefig(out_png, dpi=150)
+    fig.savefig(out_path, dpi=150)
     plt.close(fig)
 
-def main() -> int:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--input", required=True)
-    ap.add_argument("--out", required=True)
-    ap.add_argument("--runs", type=int, default=100)
-    ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--augment", action="store_true")
-    args = ap.parse_args()
 
+def _phase_space_plot(
+    out_path: Path,
+    df: pd.DataFrame,
+    timeline_df: pd.DataFrame,
+    run_id: int,
+) -> None:
+    import matplotlib.pyplot as plt  # local import
+    from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
+
+    sub = timeline_df[timeline_df["run_id"] == run_id].copy()
+    if sub.empty:
+        return
+
+    # Choose 3 axes. Prefer speed + foil + derivative proxy.
+    t = sub["time_s"].to_numpy(dtype=float)
+    score = sub["score_mean"].to_numpy(dtype=float)
+
+    foil = df["foil_height_m"].to_numpy(dtype=float) if "foil_height_m" in df.columns else np.zeros_like(t)
+    speed_col = None
+    for c in ["boat_speed", "boat_speed_mps", "speed_mps", "speed", "v"]:
+        if c in df.columns:
+            speed_col = c
+            break
+    speed = df[speed_col].to_numpy(dtype=float) if speed_col else np.zeros_like(t)
+
+    dt = np.gradient(t)
+    dt[~np.isfinite(dt) | (dt <= 0)] = np.nanmedian(dt[np.isfinite(dt) & (dt > 0)]) if np.any(np.isfinite(dt) & (dt > 0)) else 1.0
+    accel = np.gradient(speed) / dt
+
+    # Color rule requested: score_mean > 0.20 in red.
+    mask = score > 0.20
+
+    fig = plt.figure()
+    ax = fig.add_subplot(111, projection="3d")
+
+    ax.scatter(speed[~mask], foil[~mask], accel[~mask], s=6)
+    ax.scatter(speed[mask], foil[mask], accel[mask], s=10)
+
+    ax.set_xlabel(speed_col or "speed")
+    ax.set_ylabel("foil_height_m")
+    ax.set_zlabel("accel")
+
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(prog="chaostrace.run_sweep")
+    parser.add_argument("--input", required=True, help="CSV input (must contain time_s)")
+    parser.add_argument("--out", required=True, help="Output directory")
+    parser.add_argument("--runs", type=int, default=3, help="Number of runs (configs) to execute")
+    parser.add_argument("--seed", type=int, default=0, help="Random seed")
+    parser.add_argument("--augment", action="store_true", help="Optional light augmentation/noise")
+
+    parser.add_argument("--window-s", default="3,5,10,20", help="Comma list, seconds")
+    parser.add_argument("--drop-threshold", default="0.10,0.20,0.30,0.40", help="Comma list")
+    parser.add_argument("--emb-dim", default="3,4,5", help="Comma list")
+    parser.add_argument("--emb-lag", default="1,3,5,8,12", help="Comma list")
+
+    args = parser.parse_args()
+
+    input_path = Path(args.input)
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    df = load_timeseries(args.input)
-    rng = np.random.default_rng(args.seed)
-    if args.augment:
-        df = add_realistic_noise(df, rng=rng)
-        df = tiny_perturb(df, rng=rng, eps=1e-3)
+    df = pd.read_csv(input_path)
+    if "time_s" not in df.columns:
+        raise SystemExit("Input CSV must contain a time_s column")
 
-    cfgs = build_grid(args.runs)
-    metrics_df, anoms_df = sweep(df, cfgs=cfgs, seed=args.seed)
+    df = df.sort_values("time_s", kind="mergesort").reset_index(drop=True)
 
-    (out_dir / "metrics.csv").write_text(metrics_df.to_csv(index=False), encoding="utf-8")
-    (out_dir / "anomalies.csv").write_text(anoms_df.to_csv(index=False), encoding="utf-8")
+    rng = np.random.default_rng(int(args.seed))
 
-    # Build a score series for coloring (approx): use anomalies if available by nearest time
-score_series = None
-if not anoms_df.empty:
-    # use run_id=0 if present as representative for coloring demo
-    a0 = anoms_df[anoms_df["run_id"] == 0].copy()
-    if not a0.empty:
-        a0 = a0.sort_values("time_s")
-        score_series = pd.Series(
-            np.interp(
-                df["time_s"].to_numpy(dtype=float),
-                a0["time_s"].to_numpy(dtype=float),
-                a0["score_mean"].to_numpy(dtype=float),
-                left=float(a0["score_mean"].iloc[0]),
-                right=float(a0["score_mean"].iloc[-1]),
-            )
-        )
+    if bool(args.augment):
+        # Very light augmentation: small gaussian noise on numeric columns (except time_s)
+        for c in df.columns:
+            if c == "time_s":
+                continue
+            if pd.api.types.is_numeric_dtype(df[c]):
+                x = df[c].to_numpy(dtype=float)
+                sd = float(np.nanstd(x))
+                if np.isfinite(sd) and sd > 0:
+                    df[c] = x + rng.normal(0.0, 0.01 * sd, size=x.shape[0])
 
-fig_path = out_dir / "fig_phase.png"
-phase_portrait_3d_colored(df, score_series, fig_path)
+    window_s = _parse_list_int(args.window_s)
+    drop_threshold = _parse_list_float(args.drop_threshold)
+    emb_dim = _parse_list_int(args.emb_dim)
+    emb_lag = _parse_list_int(args.emb_lag)
 
-fig_timeline = out_dir / "fig_timeline.png"
-timeline_overlay(df, score_series, fig_timeline)
+    grid = build_grid(window_s=window_s, drop_threshold=drop_threshold, emb_dim=emb_dim, emb_lag=emb_lag)
+    if not grid:
+        raise SystemExit("Empty sweep grid")
 
-    write_manifest(
-        out_dir,
-        params={"input": str(Path(args.input)), "runs": args.runs, "seed": args.seed, "augment": bool(args.augment)},
-        files=["metrics.csv", "anomalies.csv", "fig_phase.png", "fig_timeline.png"],
-    )
-    print(f"Wrote: {out_dir}")
+    runs = int(args.runs)
+    if runs <= 0:
+        raise SystemExit("--runs must be > 0")
+
+    # Deterministic selection of cfgs
+    if runs <= len(grid):
+        idx = rng.choice(len(grid), size=runs, replace=False)
+    else:
+        idx = rng.choice(len(grid), size=runs, replace=True)
+
+    cfgs = [grid[int(i)] for i in idx]
+
+    metrics_df, timeline_df = sweep(df, cfgs, seed=int(args.seed))
+
+    metrics_path = out_dir / "metrics.csv"
+    anomalies_path = out_dir / "anomalies.csv"
+    fig_phase = out_dir / "fig_phase.png"
+    fig_timeline = out_dir / "fig_timeline.png"
+
+    metrics_df.to_csv(metrics_path, index=False)
+
+    anomalies_df = timeline_df[["run_id", "time_s", "score_mean"]].copy()
+    anomalies_df.to_csv(anomalies_path, index=False)
+
+    best_run = _best_run_id(metrics_df)
+
+    _phase_space_plot(fig_phase, df, timeline_df, best_run)
+    _timeline_overlay_plot(fig_timeline, df, timeline_df, best_run)
+
+    params = {
+        "input": str(input_path),
+        "out": str(out_dir),
+        "runs": runs,
+        "seed": int(args.seed),
+        "augment": bool(args.augment),
+        "grid": {
+            "window_s": window_s,
+            "drop_threshold": drop_threshold,
+            "emb_dim": emb_dim,
+            "emb_lag": emb_lag,
+        },
+        "best_run_id": int(best_run),
+    }
+
+    produced = [metrics_path, anomalies_path, fig_phase, fig_timeline]
+    manifest_path = write_manifest(out_dir, params=params, files=produced)
+
+    # Make sure manifest exists and is last
+    _ = manifest_path
+
     return 0
+
 
 if __name__ == "__main__":
     raise SystemExit(main())
