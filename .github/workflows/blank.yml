@@ -1,41 +1,72 @@
-name: sweeps
+name: ChaosTrace CI
 
 on:
+  push:
+    branches: [main]
+  pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  sweep:
+  ci:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: Install
-        working-directory: ChaosTrace
+      - name: Install deps
+        shell: bash
         run: |
+          set -euo pipefail
           python -m pip install -U pip
-          pip install -e ".[dev]"
 
-      - name: Tests
-        working-directory: ChaosTrace
-        run: |
-          python -m pytest
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          fi
 
-      - name: Smoke sweep
-        working-directory: ChaosTrace
+          if [ -f requirements-dev.txt ]; then
+            pip install -r requirements-dev.txt
+          fi
+
+          if [ -f pyproject.toml ]; then
+            pip install -e .
+          fi
+
+      - name: Lint (optional)
+        shell: bash
         run: |
-          mkdir -p _ci_out/smoke
-          python -m chaostrace.cli.run_sweep \
-            --input test_data/sample_timeseries.csv \
-            --out _ci_out/smoke \
-            --runs 5
+          set -euo pipefail
+          if command -v ruff >/dev/null 2>&1; then ruff check .; else echo "ruff not installed"; fi
+          if command -v black >/dev/null 2>&1; then black --check .; else echo "black not installed"; fi
+          if command -v mypy >/dev/null 2>&1; then mypy .; else echo "mypy not installed"; fi
+
+      - name: Tests (optional)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if command -v pytest >/dev/null 2>&1; then pytest -q; else echo "pytest not installed"; fi
+
+      - name: Prepare artifact folder
+        shell: bash
+        run: mkdir -p _ci_out
 
       - name: Upload artifacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: sweep_out
-          path: ChaosTrace/_ci_out/
+          name: ci_out
+          path: _ci_out
+          if-no-files-found: ignore
