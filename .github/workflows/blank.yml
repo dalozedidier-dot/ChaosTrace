@@ -1,16 +1,20 @@
-name: ci
+name: sweeps
 
 on:
-  push:
-  pull_request:
+  workflow_dispatch:
+    inputs:
+      runs:
+        description: "Number of sweep configs"
+        required: false
+        default: "200"
+      seed:
+        description: "RNG seed"
+        required: false
+        default: "7"
 
 jobs:
-  test:
+  sweep:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ["3.12"]
 
     steps:
       - name: Checkout
@@ -19,7 +23,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: "3.12"
 
       - name: Install deps
         run: |
@@ -27,29 +31,19 @@ jobs:
           python -m pip install -U pip
           pip install -e ".[dev]"
 
-      - name: Lint (ruff)
+      - name: Run sweep
         run: |
           set -euo pipefail
-          python -m ruff check .
-
-      - name: Tests
-        run: |
-          set -euo pipefail
-          python -m pytest -q --cov=chaostrace --cov-report=term-missing
-
-      - name: Smoke sweep
-        run: |
-          set -euo pipefail
-          mkdir -p _ci_out/smoke
+          mkdir -p _ci_out/sweep
           python -m chaostrace.cli.run_sweep \
             --input test_data/sample_timeseries.csv \
-            --out _ci_out/smoke \
-            --runs 3 \
-            --seed 7
+            --out _ci_out/sweep \
+            --runs "${{ inputs.runs }}" \
+            --seed "${{ inputs.seed }}"
 
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ci_out_py${{ matrix.python-version }}
+          name: sweeps_out
           path: _ci_out/
