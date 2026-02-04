@@ -54,10 +54,38 @@ def run_one(df_win: pd.DataFrame, cfg: SweepConfig) -> dict[str, Any]:
     for t in timelines[1:]:
         merged = merged.merge(t, on="time_s", how="outer")
     merged = merged.sort_values("time_s").reset_index(drop=True)
+    # weighted global score (default weights tuned for "silence before drop")
+weights = {
+    "null_trace_foil_height_m": 0.40,
+    "delta_stats_boat_speed_vs_foil_height_m": 0.30,
+    "markov_drop": 0.20,
+    "rqa_light_boat_speed": 0.10,
+}
+
+wsum = 0.0
+merged["score_mean"] = 0.0
+for col in score_cols:
+    name = col.replace("score__", "")
+    w = float(weights.get(name, 0.0))
+    if w <= 0.0:
+        continue
+    merged["score_mean"] += w * merged[col].fillna(0.0)
+    wsum += w
+if wsum > 0.0:
+    merged["score_mean"] = merged["score_mean"] / wsum
+else:
     merged["score_mean"] = merged[score_cols].mean(axis=1, skipna=True)
 
-    metrics["score_mean_p95"] = float(np.nanpercentile(merged["score_mean"].to_numpy(), 95))
-    metrics["score_mean_mean"] = float(np.nanmean(merged["score_mean"].to_numpy()))
+metrics["score_mean_p95"] = float(np.nanpercentile(merged["score_mean"].to_numpy(), 95))
+metrics["score_mean_mean"] = float(np.nanmean(merged["score_mean"].to_numpy()))
+
+# alert threshold: count how many timestamps exceed threshold
+alert_threshold = 0.18
+alerts = (merged["score_mean"] > alert_threshold).astype(float)
+metrics["alert_threshold"] = float(alert_threshold)
+metrics["alert_count"] = float(np.nansum(alerts))
+metrics["alert_frac"] = float(np.nanmean(alerts))
+
     return {"metrics": metrics, "timeline": merged}
 
 def sweep(df: pd.DataFrame, cfgs: list[SweepConfig], seed: int = 0) -> tuple[pd.DataFrame, pd.DataFrame]:
