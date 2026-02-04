@@ -2,36 +2,42 @@
 requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
+
 [project]
 name = "chaostrace"
 version = "0.1.0"
-description = "Sweep-based multivariate regime/anomaly detection for foiling sailboats (F50-like)."
+description = "Sweep-based multivariate regime/anomaly detection for foiling telemetry."
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 license = {text = "MIT"}
-authors = [{name="SailFoil Silence Lab"}]
+authors = [{name="ChaosTrace"}]
+
 dependencies = [
   "numpy>=1.26",
   "pandas>=2.1",
   "scipy>=1.11",
   "statsmodels>=0.14",
   "matplotlib>=3.8",
-  "networkx>=3.2",
+  "networkx>=3.2"
 ]
+
 
 [project.optional-dependencies]
 dev = [
   "pytest>=8.0",
   "pytest-cov>=5.0",
-  "ruff>=0.4.0",
+  "ruff>=0.4.0"
 ]
+
 
 [tool.setuptools]
 package-dir = {"" = "src"}
 
+
 [tool.ruff]
 line-length = 100
-target-version = "py311"
+target-version = "py312"
+
 
 [tool.pytest.ini_options]
 addopts = "-q"
