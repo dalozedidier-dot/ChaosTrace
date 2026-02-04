@@ -1,11 +1,19 @@
-name: ci
+name: sweeps
 
 on:
-  push:
-  pull_request:
+  workflow_dispatch:
+    inputs:
+      runs:
+        description: "Number of sweep configs"
+        required: false
+        default: "200"
+      seed:
+        description: "RNG seed"
+        required: false
+        default: "7"
 
 jobs:
-  test:
+  sweep:
     runs-on: ubuntu-latest
 
     steps:
@@ -17,15 +25,25 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Run CI script (auto-detect project root)
+      - name: Install deps
         run: |
           set -euo pipefail
-          bash scripts/ci_detect_project_root.sh
+          python -m pip install -U pip
+          pip install -e ".[dev]"
 
-      - name: Upload artifacts (best effort)
+      - name: Run sweep
+        run: |
+          set -euo pipefail
+          mkdir -p _ci_out/sweep
+          python -m chaostrace.cli.run_sweep \
+            --input test_data/sample_timeseries.csv \
+            --out _ci_out/sweep \
+            --runs "${{ inputs.runs }}" \
+            --seed "${{ inputs.seed }}"
+
+      - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ci_out
-          path: |
-            **/_ci_out/**
+          name: sweeps_out
+          path: _ci_out/
