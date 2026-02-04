@@ -7,10 +7,6 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ["3.12"]
 
     steps:
       - name: Checkout
@@ -19,36 +15,17 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: "3.12"
 
-      - name: Install deps
+      - name: Run CI script (auto-detect project root)
         run: |
           set -euo pipefail
-          python -m pip install -U pip
-          pip install -e ".[dev]"
+          bash scripts/ci_detect_project_root.sh
 
-      - name: Lint (ruff)
-        run: |
-          set -euo pipefail
-          python -m ruff check .
-
-      - name: Tests
-        run: |
-          set -euo pipefail
-          python -m pytest -q --cov=chaostrace --cov-report=term-missing
-
-      - name: Smoke sweep
-        run: |
-          set -euo pipefail
-          mkdir -p _ci_out/smoke
-          python -m chaostrace.cli.run_sweep \
-            --input test_data/sample_timeseries.csv \
-            --out _ci_out/smoke \
-            --runs 3 \
-            --seed 7
-
-      - name: Upload artifacts
+      - name: Upload artifacts (best effort)
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ci_out_py${{ matrix.python-version }}
-          path: _ci_out/
+          name: ci_out
+          path: |
+            **/_ci_out/**
