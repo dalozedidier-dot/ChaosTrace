@@ -1,12 +1,10 @@
-name: ChaosTrace CI
+name: sweeps
 
 on:
-  push:
-  pull_request:
   workflow_dispatch:
 
 jobs:
-  ci:
+  sweep:
     runs-on: ubuntu-latest
 
     steps:
@@ -15,11 +13,29 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-          cache: pip
 
-      - run: |
+      - name: Install
+        working-directory: ChaosTrace
+        run: |
           python -m pip install -U pip
-          pip install -r requirements.txt || true
-          pip install -e . || true
+          pip install -e ".[dev]"
 
-      - run: pytest -q || true
+      - name: Tests
+        working-directory: ChaosTrace
+        run: |
+          python -m pytest
+
+      - name: Smoke sweep
+        working-directory: ChaosTrace
+        run: |
+          mkdir -p _ci_out/smoke
+          python -m chaostrace.cli.run_sweep \
+            --input test_data/sample_timeseries.csv \
+            --out _ci_out/smoke \
+            --runs 5
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: sweep_out
+          path: ChaosTrace/_ci_out/
