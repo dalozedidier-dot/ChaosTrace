@@ -15,3 +15,9 @@ Files changed:
 - scripts/generate_sailgp_synth.py
 - test_data/*.csv
 - .github/workflows/ci.yml (adds workflow_dispatch)
+
+## v0.2 update (discriminative v2)
+- CSV output stabilized with float_format=%.6f to avoid tiny cross-version diffs.
+- Added representative plots: fig_phase_repr.png and fig_timeline_repr.png (median-ish run),
+  while keeping fig_phase.png / fig_timeline.png as the most-anomalous run for continuity.
+- Manifest now records best_run_id / repr_run_id and their thresholds.
