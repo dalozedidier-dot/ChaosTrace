@@ -3,35 +3,37 @@ name: ci
 on:
   push:
   pull_request:
+  workflow_dispatch:
+    inputs:
+      runs:
+        description: "Number of sweep configs for the smoke run"
+        required: false
+        default: "3"
+      seed:
+        description: "RNG seed"
+        required: false
+        default: "7"
+      augment:
+        description: "Enable synthetic augmentation (true/false)"
+        required: false
+        default: "false"
 
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12"]
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Debug commit + files
-        run: |
-          set -euo pipefail
-          echo "HEAD:"
-          git rev-parse HEAD
-          echo "BRANCH/REF:"
-          git branch -vv || true
-          echo "FILES AT ROOT:"
-          ls -la
-          echo "TRACKED ROOT FILES:"
-          git ls-tree --name-only HEAD | sed -n '1,200p'
-          echo "FIND pyproject:"
-          find . -maxdepth 3 -name pyproject.toml -print
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
 
       - name: Install deps
         run: |
@@ -39,7 +41,44 @@ jobs:
           python -m pip install -U pip
           pip install -e ".[dev]"
 
+      - name: Lint (ruff)
+        run: |
+          set -euo pipefail
+          python -m ruff check .
+
       - name: Tests
         run: |
           set -euo pipefail
-          python -m pytest -q
+          python -m pytest -q --cov=chaostrace --cov-report=term-missing
+
+      - name: Smoke sweep
+        run: |
+          set -euo pipefail
+          mkdir -p _ci_out/smoke
+
+          EXTRA=""
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            if [ "${{ inputs.augment }}" = "true" ]; then
+              EXTRA="--augment"
+            fi
+
+            python -m chaostrace.cli.run_sweep \
+              --input test_data/sample_timeseries.csv \
+              --out _ci_out/smoke \
+              --runs "${{ inputs.runs }}" \
+              --seed "${{ inputs.seed }}" \
+              $EXTRA
+          else
+            python -m chaostrace.cli.run_sweep \
+              --input test_data/sample_timeseries.csv \
+              --out _ci_out/smoke \
+              --runs 3 \
+              --seed 7
+          fi
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci_out_py${{ matrix.python-version }}
+          path: _ci_out/
