@@ -45,10 +45,57 @@ def write_manifest(out_dir: Path, params: dict, files: list[Path]) -> Path:
 
 
 def _best_run_id(metrics_df: pd.DataFrame) -> int:
-    if metrics_df.empty or "score_mean" not in metrics_df.columns:
+    """Pick the run to highlight as the 'most anomalous' configuration."""
+    if metrics_df.empty:
         return 1
-    idx = int(metrics_df["score_mean"].astype(float).idxmax())
-    return int(metrics_df.loc[idx, "run_id"])
+
+    # Prefer alert_frac when present (directly tied to threshold crossing),
+    # otherwise fall back to score_mean.
+    if "alert_frac" in metrics_df.columns:
+        df = metrics_df.copy()
+        df["alert_frac"] = df["alert_frac"].astype(float)
+        if "score_mean" in df.columns:
+            df["score_mean"] = df["score_mean"].astype(float)
+            df = df.sort_values(["alert_frac", "score_mean"], ascending=False)
+        else:
+            df = df.sort_values(["alert_frac"], ascending=False)
+        return int(df["run_id"].iloc[0])
+
+    if "score_mean" in metrics_df.columns:
+        idx = int(metrics_df["score_mean"].astype(float).idxmax())
+        return int(metrics_df.loc[idx, "run_id"])
+
+    return int(metrics_df["run_id"].iloc[0])
+
+
+
+def _representative_run_id(metrics_df: pd.DataFrame) -> int:
+    """Pick a 'typical' run (median alert_frac, tie-break by score_mean)."""
+    if metrics_df.empty:
+        return 1
+
+    if "alert_frac" in metrics_df.columns:
+        af = metrics_df["alert_frac"].astype(float)
+        med = float(af.median())
+        dist = (af - med).abs()
+        # Tie-break by score_mean if available: choose the closest-to-median with median-ish score.
+        if "score_mean" in metrics_df.columns:
+            sm = metrics_df["score_mean"].astype(float)
+            # lexsort: first dist, then |sm - median(sm)|
+            sm_med = float(sm.median())
+            sm_dist = (sm - sm_med).abs()
+            order = np.lexsort((sm_dist.to_numpy(), dist.to_numpy()))
+            rid = int(metrics_df.iloc[int(order[0])]["run_id"])
+            return rid
+        return int(metrics_df.loc[int(dist.idxmin()), "run_id"])
+
+    if "score_mean" in metrics_df.columns:
+        sm = metrics_df["score_mean"].astype(float)
+        med = float(sm.median())
+        dist = (sm - med).abs()
+        return int(metrics_df.loc[int(dist.idxmin()), "run_id"])
+
+    return int(metrics_df["run_id"].iloc[0])
 
 
 def _minmax01(x: np.ndarray) -> np.ndarray:
@@ -240,26 +287,40 @@ def main() -> int:
 
     metrics_path = out_dir / "metrics.csv"
     anomalies_path = out_dir / "anomalies.csv"
+
+    # Primary figures: most-anomalous (best) run, for continuity with earlier releases
     fig_phase = out_dir / "fig_phase.png"
     fig_timeline = out_dir / "fig_timeline.png"
 
-    metrics_df.to_csv(metrics_path, index=False)
+    # Additional figures: representative (median-ish) run, useful when the dataset is stable
+    fig_phase_repr = out_dir / "fig_phase_repr.png"
+    fig_timeline_repr = out_dir / "fig_timeline_repr.png"
+
+    # Stable, cross-version CSV output (avoid 1e-16 float diffs between Python/Pandas builds)
+    metrics_df.to_csv(metrics_path, index=False, float_format="%.6f")
 
     anomalies_df = timeline_df[["run_id", "time_s", "score_mean"]].copy()
-    anomalies_df.to_csv(anomalies_path, index=False)
+    anomalies_df.to_csv(anomalies_path, index=False, float_format="%.6f")
 
     best_run = _best_run_id(metrics_df)
+    repr_run = _representative_run_id(metrics_df)
 
-    # Use the threshold computed for the best run when plotting
-    thr = 0.55
-    if not metrics_df.empty and "alert_threshold_used" in metrics_df.columns:
-        row = metrics_df[metrics_df["run_id"] == best_run]
-        if not row.empty:
-            thr = float(row["alert_threshold_used"].iloc[0])
+    def _thr_for(run_id: int) -> float:
+        thr0 = 0.55
+        if not metrics_df.empty and "alert_threshold_used" in metrics_df.columns:
+            row = metrics_df[metrics_df["run_id"] == run_id]
+            if not row.empty:
+                thr0 = float(row["alert_threshold_used"].iloc[0])
+        return float(thr0)
 
-    _phase_space_plot(fig_phase, df, timeline_df, best_run, thr)
-    _timeline_overlay_plot(fig_timeline, df, timeline_df, best_run, thr)
+    thr_best = _thr_for(best_run)
+    thr_repr = _thr_for(repr_run)
 
+    _phase_space_plot(fig_phase, df, timeline_df, best_run, thr_best)
+    _timeline_overlay_plot(fig_timeline, df, timeline_df, best_run, thr_best)
+
+    _phase_space_plot(fig_phase_repr, df, timeline_df, repr_run, thr_repr)
+    _timeline_overlay_plot(fig_timeline_repr, df, timeline_df, repr_run, thr_repr)
     params = {
         "input": str(input_path),
         "out": str(out_dir),
@@ -275,10 +336,19 @@ def main() -> int:
             "emb_lag": emb_lag,
         },
         "best_run_id": int(best_run),
-        "best_run_alert_threshold": float(thr),
+        "best_run_alert_threshold": float(thr_best),
+        "repr_run_id": int(repr_run),
+        "repr_run_alert_threshold": float(thr_repr),
     }
 
-    produced = [metrics_path, anomalies_path, fig_phase, fig_timeline]
+    produced = [
+        metrics_path,
+        anomalies_path,
+        fig_phase,
+        fig_timeline,
+        fig_phase_repr,
+        fig_timeline_repr,
+    ]
     _ = write_manifest(out_dir, params=params, files=produced)
 
     return 0
