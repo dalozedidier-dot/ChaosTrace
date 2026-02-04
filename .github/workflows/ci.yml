@@ -7,23 +7,19 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12"]
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
-
-      # DEBUG ULTRA CLAIR
-      - name: Show repo structure
-        run: |
-          echo "PWD:"
-          pwd
-          echo "ROOT LIST:"
-          ls -la
-          echo "SEARCH pyproject:"
-          find . -name pyproject.toml -print
+          python-version: ${{ matrix.python-version }}
 
       - name: Install deps
         run: |
@@ -31,6 +27,29 @@ jobs:
           python -m pip install -U pip
           pip install -e ".[dev]"
 
+      - name: Lint (ruff)
+        run: |
+          set -euo pipefail
+          python -m ruff check .
+
       - name: Tests
         run: |
-          python -m pytest -q || true
+          set -euo pipefail
+          python -m pytest -q --cov=chaostrace --cov-report=term-missing
+
+      - name: Smoke sweep
+        run: |
+          set -euo pipefail
+          mkdir -p _ci_out/smoke
+          python -m chaostrace.cli.run_sweep \
+            --input test_data/sample_timeseries.csv \
+            --out _ci_out/smoke \
+            --runs 3 \
+            --seed 7
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci_out_py${{ matrix.python-version }}
+          path: _ci_out/
