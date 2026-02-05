@@ -38,7 +38,7 @@ jobs:
       - name: Smoke sweep
         run: |
           mkdir -p _ci_out/smoke
-          python -m chaostrace.cli.run_sweep --input test_data/sample_timeseries.csv --out _ci_out/smoke --runs 3 --seed 7
+          python -m chaostrace.cli.run_sweep --input test_data/sample_timeseries_1_2_drops.csv --out _ci_out/smoke --runs 3 --seed 7
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
