@@ -19,10 +19,10 @@ from chaostrace.features.windowing import estimate_sample_hz
 ALERT_THRESHOLD = 0.55
 
 # Variant score weights (sum to 1.0)
-W_VARIANT_DELTA = 0.25
+W_VARIANT_DELTA = 0.15
 W_VARIANT_RQA = 0.25
 W_VARIANT_LYAP = 0.15
-W_VARIANT_MARKOV = 0.35
+W_VARIANT_MARKOV = 0.45
 
 
 @dataclass(frozen=True)
