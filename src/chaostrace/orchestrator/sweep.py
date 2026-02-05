@@ -18,6 +18,12 @@ from chaostrace.features.windowing import estimate_sample_hz
 
 ALERT_THRESHOLD = 0.55
 
+# Variant score weights (sum to 1.0)
+W_VARIANT_DELTA = 0.35
+W_VARIANT_RQA = 0.25
+W_VARIANT_LYAP = 0.15
+W_VARIANT_MARKOV = 0.25
+
 
 @dataclass(frozen=True)
 class SweepConfig:
@@ -115,7 +121,10 @@ def sweep(df: pd.DataFrame, cfgs: list[SweepConfig], *, seed: int = 7) -> tuple[
         )
 
         score_variant = np.clip(
-            0.4 * delta01 + 0.3 * (1.0 - rqa_inv_series) + 0.2 * lyap_series + 0.1 * markov01,
+            W_VARIANT_DELTA * delta01
+            + W_VARIANT_RQA * (1.0 - rqa_inv_series)
+            + W_VARIANT_LYAP * lyap_series
+            + W_VARIANT_MARKOV * markov01,
             0.0,
             1.0,
         )
