@@ -36,3 +36,6 @@ target-version = "py311"
 [tool.pytest.ini_options]
 addopts = "-q"
 testpaths = ["tests"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
