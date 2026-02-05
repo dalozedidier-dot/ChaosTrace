@@ -1,0 +1,11 @@
+Patch: Boost w_markov in score_variant
+
+What changes:
+- Introduces W_VARIANT_* constants in src/chaostrace/orchestrator/sweep.py
+- Increases markov contribution in score_variant from 0.10 to 0.25
+- Keeps total weight = 1.0 by slightly reducing delta/rqa/lyap weights
+
+How to apply:
+- Unzip at repository root (overwrite allowed)
+- Commit and run:
+  python -m chaostrace.cli.run_sweep --input test_data/sample_timeseries_1_2_drops.csv --out _ci_out/sweep50 --runs 50 --seed 7
