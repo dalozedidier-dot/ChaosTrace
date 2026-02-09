@@ -1,69 +1,99 @@
 # ChaosTrace
 
-Objectif: faire émerger du « silence » (absences, transitions subtiles, régimes stables/instables) au milieu d'un chaos multivarié type F50.
-Ce repo est un squelette modulaire, CI-friendly, orienté sweeps paramétriques et artefacts auditables (JSON/CSV + hashes + manifest).
+ChaosTrace est un toolkit léger basé sur des signaux de chaos (Takens, RQA, Lyapunov proxy) pour détecter des transitions de régime et des événements de type foil drop dans des séries temporelles multivariées.
 
-## Ce que tu as tout de suite
-- Ingestion CSV/JSON (schema simple, extensible)
-- Génération synthétique (bruit réaliste + perturbations minimes pour tester la sensibilité)
-- Orchestrateur de sweeps (fenêtres, seuils drop, embedding Takens, lags)
-- Analyseurs plug-and-play:
-  - Null-trace (laminarité / stabilité anormale)
-  - Delta-stats (variations relatives locales)
-  - Markov drop (chaîne de Markov sur états foil)
-  - Graph-based (NetworkX: transitions d'états, cycles, dead-ends)
-  - RQA légère (sans dépendance lourde, métriques de base)
-  - Lyapunov-like (approx Rosenstein simplifiée)
-- Sorties auditables dans `_ci_out/` avec `manifest.json` (hashes, params, versions)
-- CI GitHub Actions: pytest + un mini sweep de smoke
+Cette version ajoute un mode hybride, conçu pour augmenter précision et recall tout en gardant l'interprétabilité par les signaux chaos.
 
-## Démarrage rapide
-### 1) Installer
+## Installation
+
+Core (sans ML) :
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -U pip
 pip install -e ".[dev]"
 ```
 
-### 2) Lancer un sweep
+Options :
+- Matrix Profile :
 ```bash
-python -m chaostrace.cli.run_sweep \
-  --input test_data/sample_timeseries.csv \
-  --out _ci_out/demo \
-  --runs 25
+pip install -e ".[mp]"
 ```
 
-### 3) Lire les résultats
-- `_ci_out/demo/manifest.json` : paramètres + hashes + versions
-- `_ci_out/demo/metrics.csv` : métriques par run
-- `_ci_out/demo/anomalies.csv` : score timeline agrégé par run
-- `_ci_out/demo/fig_phase.png` : portrait de phase 3D (matplotlib)
+- Deep learning (PyTorch) :
+```bash
+pip install -e ".[dl]"
+```
 
-## Convention de données (minimum)
-Colonnes attendues (tu peux en ajouter):
-- time_s
-- boat_speed
-- heading_deg
-- wind_speed
-- wind_angle_deg
-- foil_height_m
-- foil_rake_deg
-- daggerboard_depth_m
-- vmg
-- pitch_deg
-- roll_deg
+## Usage
 
-Le sample dans `test_data/` est synthétique.
+### Sweep chaos (core)
+```bash
+python -m chaostrace.cli.run_sweep --input test_data/sample_timeseries.csv --out _ci_out/run
+```
 
-## Philosophie (auditabilité)
-- Chaque run est déterministe si tu fixes `--seed`.
-- Chaque run écrit un manifest avec hash SHA256 des fichiers produits.
-- Pas d'inférence implicite: un analyseur doit écrire ses métriques explicitement.
+Fichiers générés :
+- metrics.csv
+- anomalies.csv
+- fig_phase.png
+- fig_timeline.png
+- fig_timeline_inv_var.png
+- manifest.json
 
+### Mode hybride (fusion chaos + MP + causal + DL optionnel)
 
+Exemple hybride sans DL :
+```bash
+python -m chaostrace.cli.run_hybrid --input test_data/sample_timeseries.csv --out _ci_out/hybrid --enable-causal
+```
 
-## Synthetic samples
-- `test_data/sample_timeseries_stable.csv`
-- `test_data/sample_timeseries_1_2_drops.csv`
-- `test_data/sample_timeseries_chaotic.csv`
+Avec Matrix Profile :
+```bash
+python -m chaostrace.cli.run_hybrid --input test_data/sample_timeseries.csv --out _ci_out/hybrid --enable-mp --mp-col boat_speed
+```
+
+Avec DL (si un modèle a été entraîné) :
+```bash
+python -m chaostrace.cli.run_hybrid --input test_data/sample_timeseries.csv --out _ci_out/hybrid --model _ci_out/model_dir
+```
+
+Sorties hybrides :
+- anomalies_hybrid.csv (scores et alertes)
+- metrics_hybrid.json (PRF, event-level, lead times)
+- explain_hybrid.jsonl (snapshots explicables sur les points alertés)
+- fig_timeline_hybrid.png
+- fig_phase_hybrid.png
+- manifest.json
+
+## Entraînement DL (optionnel)
+
+Le CLI `train_hybrid` génère des labels `is_drop` via Markov (si absents), puis entraîne un modèle Conv + Transformer sur des fenêtres.
+
+```bash
+python -m chaostrace.cli.train_hybrid \
+  --input test_data/sample_timeseries_1_2_drops.csv \
+  --out _ci_out/model_dir \
+  --cols boat_speed,foil_height_m \
+  --window-s 5 \
+  --stride-s 0.5 \
+  --horizon-s 0.0 \
+  --drop-threshold 0.4 \
+  --supervised-epochs 10
+```
+
+Pour un prétrain contrastif (SimCLR simplifié) :
+```bash
+python -m chaostrace.cli.train_hybrid \
+  --input test_data/sample_timeseries_1_2_drops.csv \
+  --out _ci_out/model_dir \
+  --cols boat_speed,foil_height_m \
+  --window-s 5 \
+  --stride-s 0.5 \
+  --horizon-s 1.5 \
+  --drop-threshold 0.4 \
+  --contrastive-epochs 5 \
+  --supervised-epochs 10
+```
+
+## Notes de design
+
+- Interprétabilité : les scores chaos restent visibles, et la fusion conserve les composantes et les poids.
+- Robustesse : seuil dynamique calculé sur une baseline stable, puis post-traitement event-level (merge gaps, suppression spikes).
+- Dépendances : les modules MP et DL sont optionnels, le core reste léger.

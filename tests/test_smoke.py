@@ -17,3 +17,8 @@ def test_import_and_sweep() -> None:
     assert not timeline_df.empty
     assert metrics_df.loc[0, "run_id"] == 1
     assert timeline_df["run_id"].nunique() == 1
+
+
+def test_hybrid_imports_do_not_require_extras() -> None:
+    import chaostrace.hybrid  # noqa: F401
+    from chaostrace.hybrid.fusion import fuse_scores  # noqa: F401

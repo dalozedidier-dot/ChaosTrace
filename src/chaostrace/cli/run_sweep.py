@@ -31,8 +31,7 @@ def _norm01(x: np.ndarray) -> np.ndarray:
     return (x - lo) / (hi - lo)
 
 
-def _save_timeline(df: pd.DataFrame, tl: pd.DataFrame, outp: Path, run_id: int) -> tuple[Path, Path]:
-    # Classic overlay: foil + speed + score_mean
+def _save_timeline(df: pd.DataFrame, tl: pd.DataFrame, outp: Path, *, threshold: float) -> tuple[Path, Path]:
     fig, ax1 = plt.subplots()
     t = df["time_s"].to_numpy(dtype=float)
 
@@ -46,10 +45,9 @@ def _save_timeline(df: pd.DataFrame, tl: pd.DataFrame, outp: Path, run_id: int) 
 
     ax2 = ax1.twinx()
     ax2.plot(t, tl["score_mean"].to_numpy(dtype=float), label="score_mean")
-    ax2.axhline(ALERT_THRESHOLD, linestyle=":")
+    ax2.axhline(float(threshold), linestyle=":")
     ax2.set_ylabel("score")
 
-    # Build a combined legend
     lines = ax1.get_lines() + ax2.get_lines()
     labels = [ln.get_label() for ln in lines]
     ax1.legend(lines, labels, loc="upper right")
@@ -58,7 +56,6 @@ def _save_timeline(df: pd.DataFrame, tl: pd.DataFrame, outp: Path, run_id: int) 
     fig.savefig(p1, dpi=150)
     plt.close(fig)
 
-    # Invariants vs variants view (normalized foil/speed + shading)
     fig, ax = plt.subplots()
     foil_n = _norm01(foil)
     speed_n = _norm01(speed)
@@ -70,13 +67,12 @@ def _save_timeline(df: pd.DataFrame, tl: pd.DataFrame, outp: Path, run_id: int) 
     ax.plot(t, inv, linewidth=3, label="score_invariant")
     ax.plot(t, var, linestyle="--", label="score_variant")
 
-    # Background shading rules
     inv_zone = inv > 0.6
     var_zone = (var > 0.5) & (inv < 0.4)
     ax.fill_between(t, 0.0, 1.0, where=inv_zone, alpha=0.08, label="invariant_zone")
     ax.fill_between(t, 0.0, 1.0, where=var_zone, alpha=0.10, label="variant_zone")
 
-    ax.axhline(ALERT_THRESHOLD, linestyle=":")
+    ax.axhline(float(threshold), linestyle=":")
     ax.set_xlabel("time_s")
     ax.set_ylim(-0.05, 1.05)
     ax.legend(loc="upper right")
@@ -88,11 +84,10 @@ def _save_timeline(df: pd.DataFrame, tl: pd.DataFrame, outp: Path, run_id: int) 
     return p1, p2
 
 
-def _save_phase(df: pd.DataFrame, tl: pd.DataFrame, outp: Path) -> Path:
+def _save_phase(df: pd.DataFrame, tl: pd.DataFrame, outp: Path, *, threshold: float) -> Path:
     x = df.get("boat_speed", pd.Series(np.zeros(len(df)))).to_numpy(dtype=float)
     X = takens_embedding(x, dim=3, lag=3)
     if len(X) == 0:
-        # Fallback: empty figure
         fig = plt.figure()
         p = outp / "fig_phase.png"
         fig.savefig(p, dpi=150)
@@ -100,9 +95,8 @@ def _save_phase(df: pd.DataFrame, tl: pd.DataFrame, outp: Path) -> Path:
         return p
 
     score = tl["score_mean"].to_numpy(dtype=float)
-    # Align lengths: embedding is shorter than original series
     score = score[-len(X) :]
-    hi = score > 0.55
+    hi = score > float(threshold)
 
     fig = plt.figure()
     ax = fig.add_subplot(111, projection="3d")
@@ -127,6 +121,7 @@ def main() -> None:
     ap.add_argument("--emb-dim", default="3,4,5")
     ap.add_argument("--emb-lag", default="1,3,5,8,12")
     ap.add_argument("--preset", default="default", choices=["default", "invariants"])
+    ap.add_argument("--plot-mode", default="dynamic", choices=["fixed", "dynamic"])
     args = ap.parse_args()
 
     df = load_timeseries(Path(args.input))
@@ -138,7 +133,6 @@ def main() -> None:
         emb_lag=_parse_list_ints(args.emb_lag),
     )
 
-    # Deterministic sampling of configurations
     rng = np.random.default_rng(args.seed)
     if args.runs < len(cfgs):
         idx = rng.permutation(len(cfgs))[: args.runs]
@@ -149,24 +143,26 @@ def main() -> None:
     outp = Path(args.out)
     outp.mkdir(parents=True, exist_ok=True)
 
-    metrics_path = outp / "metrics.csv"
-    anomalies_path = outp / "anomalies.csv"
-    metrics_df.to_csv(metrics_path, index=False, float_format="%.6f")
-    timeline_df.to_csv(anomalies_path, index=False, float_format="%.6f")
+    metrics_df.to_csv(outp / "metrics.csv", index=False, float_format="%.6f")
+    timeline_df.to_csv(outp / "anomalies.csv", index=False, float_format="%.6f")
 
-    # Choose a representative run for plots:
-    # median alert_frac is usually more informative than max (which can look scary on stable data).
-    run_choice = int(metrics_df.sort_values("alert_frac").iloc[len(metrics_df) // 2]["run_id"])
+    run_choice = int(metrics_df.sort_values(["alert_frac_dyn", "alert_frac", "run_id"]).iloc[0]["run_id"])
     tl = timeline_df[timeline_df["run_id"] == run_choice].reset_index(drop=True)
 
-    _save_phase(df, tl, outp)
-    _save_timeline(df, tl, outp, run_choice)
+    if args.plot_mode == "dynamic" and "alert_threshold_dyn" in metrics_df.columns:
+        threshold = float(metrics_df.loc[metrics_df["run_id"] == run_choice, "alert_threshold_dyn"].iloc[0])
+    else:
+        threshold = float(ALERT_THRESHOLD)
+
+    _save_phase(df, tl, outp, threshold=threshold)
+    _save_timeline(df, tl, outp, threshold=threshold)
 
     manifest_params = {
         "input": args.input,
         "runs": int(args.runs),
         "seed": int(args.seed),
         "preset": args.preset,
+        "plot_mode": args.plot_mode,
         "run_choice": int(run_choice),
         "grid": [asdict(c) for c in cfgs],
     }
