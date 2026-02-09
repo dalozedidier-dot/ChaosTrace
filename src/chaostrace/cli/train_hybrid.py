@@ -12,32 +12,32 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--input", required=True, help="Input CSV path")
     ap.add_argument("--out", required=True, help="Output directory for model artifacts")
-    ap.add_argument("--cols", default="boat_speed,foil_height_m", help="Comma-separated feature columns")
+    ap.add_argument(
+        "--cols",
+        default="boat_speed,foil_height_m",
+        help="Comma-separated feature columns used for training/inference",
+    )
     ap.add_argument("--window-s", type=float, default=5.0, help="Window length in seconds")
     ap.add_argument("--stride-s", type=float, default=0.5, help="Stride in seconds")
-    ap.add_argument("--horizon-s", type=float, default=0.0, help="Label horizon in seconds for early warning")
+    ap.add_argument(
+        "--horizon-s",
+        type=float,
+        default=1.0,
+        help="Early warning horizon: label is 1 if a drop occurs within this future window",
+    )
 
-    ap.add_argument("--drop-threshold", type=float, default=0.4, help="Threshold used to generate is_drop labels")
-    ap.add_argument("--contrastive-epochs", type=int, default=0, help="Contrastive pretrain epochs (optional)")
-    ap.add_argument("--supervised-epochs", type=int, default=10, help="Supervised finetune epochs")
-    ap.add_argument("--batch-size", type=int, default=64)
-    ap.add_argument("--lr", type=float, default=3e-4)
-    ap.add_argument("--pos-weight", type=float, default=3.0)
-    ap.add_argument("--device", default="cpu", help="torch device, example cpu or cuda")
+    ap.add_argument("--drop-threshold", type=float, default=0.35, help="For autolabeling if is_drop missing")
+    ap.add_argument("--contrastive-epochs", type=int, default=0, help="Optional contrastive pretrain epochs")
+    ap.add_argument("--supervised-epochs", type=int, default=10, help="Supervised training epochs")
+    ap.add_argument("--batch-size", type=int, default=64, help="Batch size")
+    ap.add_argument("--lr", type=float, default=3e-4, help="Learning rate")
+    ap.add_argument("--pos-weight", type=float, default=3.0, help="Positive class weight for BCE")
+    ap.add_argument("--device", default="cpu", help="cpu or cuda")
 
     args = ap.parse_args()
 
-    try:
-        from chaostrace.dl.train import train_hybrid_model
-    except Exception as e:
-        raise RuntimeError("Training requires optional dependency 'torch'. Install with: pip install -e '.[dl]'") from e
-
     df = load_timeseries(Path(args.input))
-    if "time_s" not in df.columns:
-        raise ValueError("time_s column required")
-
-    df = df.sort_values("time_s").reset_index(drop=True)
-    hz = estimate_sample_hz(df["time_s"].to_numpy(dtype=float))
+    hz = estimate_sample_hz(df)
 
     if "is_drop" not in df.columns:
         res = markov_drop(df, drop_threshold=float(args.drop_threshold))
@@ -48,6 +48,8 @@ def main() -> None:
     window_n = max(int(round(float(args.window_s) * hz)), 5)
     stride_n = max(int(round(float(args.stride_s) * hz)), 1)
     horizon_n = max(int(round(float(args.horizon_s) * hz)), 0)
+
+    from chaostrace.hybrid.dl.train import train_hybrid_model
 
     out_dir = Path(args.out)
     model_path = train_hybrid_model(

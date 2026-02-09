@@ -159,7 +159,7 @@ def main() -> None:
     model_dir = str(args.model).strip()
     if model_dir:
         try:
-            from chaostrace.dl.infer import infer_series
+            from chaostrace.hybrid.dl.infer import infer_series
         except Exception as e:
             raise RuntimeError("DL inference requires optional dependency 'torch'. Install with: pip install -e '.[dl]'") from e
         dl_res = infer_series(df, model_dir=Path(model_dir), device=str(args.device))

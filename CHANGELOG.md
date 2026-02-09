@@ -1,4 +1,11 @@
 # Changelog
+## 0.2.2
+- Fix CI ruff error (unused import) in hybrid Matrix Profile module.
+- Add optional DL subpackage (chaostrace.hybrid.dl) with minimal training/inference pipeline.
+- Fix train_hybrid/run_hybrid imports and make DL truly optional via extras.
+- Remove __pycache__ artifacts from distribution.
+
+
 ## 0.2.1
 - Fix: add missing hybrid modules (matrix_profile, causal drift proxy, metrics) and make chaostrace.hybrid a real package.
 - Hybrid CLI run_hybrid now runs end-to-end without optional deps unless enabled.
