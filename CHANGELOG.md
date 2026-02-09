@@ -5,6 +5,12 @@
 - Fix train_hybrid/run_hybrid imports and make DL truly optional via extras.
 - Remove __pycache__ artifacts from distribution.
 
+## 0.2.3 (2026-02-09)
+- Packaging: remove __pycache__ and .pytest_cache from bundle, keep repo clean.
+- Remove duplicate experimental `chaostrace.dl` package (hybrid DL lives under `chaostrace.hybrid.dl`).
+- Add tests to ensure hybrid CLI/modules import without optional extras (torch, stumpy).
+
+
 
 ## 0.2.1
 - Fix: add missing hybrid modules (matrix_profile, causal drift proxy, metrics) and make chaostrace.hybrid a real package.
