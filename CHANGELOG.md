@@ -1,3 +1,10 @@
+## 0.2.5
+
+- Early-warning DL: train on *drop onset* targets (predict the start of a drop, not the full drop segment), reducing label leakage and improving lead time.
+- DL inference: causal forward-fill only (no backward fill), so scores at time t never use future anchors.
+- Event-level metrics: fix contiguous-event extraction edge case.
+- CI: hybrid_dl workflow now enforces early-warning lead_s_max > 0 and F1 >= 0.90; uses tighter stride/horizon for earlier alerts.
+
 ## 0.2.4
 
 - Fix sample-rate estimation for DL training (correct window/stride/horizon in samples)

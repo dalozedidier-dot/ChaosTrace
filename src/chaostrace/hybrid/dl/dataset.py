@@ -10,7 +10,24 @@ import pandas as pd
 class WindowedDataset:
     X: np.ndarray  # shape: (n_windows, n_channels, window_n)
     y: np.ndarray  # shape: (n_windows,)
-    centers: np.ndarray  # indices into original series (ANCHOR index; see make_windows)
+    centers: np.ndarray  # anchor indices into original series (window END indices)
+
+
+def _drop_onsets(y_raw: np.ndarray) -> np.ndarray:
+    """Convert a dense is_drop mask into sparse onset events.
+
+    If is_drop is True for a contiguous segment, only the first sample of the
+    segment is considered an onset. This makes early-warning training/evaluation
+    much more meaningful (we care about predicting the START, not the whole run).
+    """
+    y = np.asarray(y_raw, dtype=float)
+    d = np.isfinite(y) & (y > 0.5)
+    onset = np.zeros_like(d, dtype=bool)
+    if d.size == 0:
+        return onset
+    onset[0] = bool(d[0])
+    onset[1:] = d[1:] & ~d[:-1]
+    return onset
 
 
 def make_windows(
@@ -28,13 +45,14 @@ def make_windows(
       - Each window uses ONLY past context and ENDS at the anchor index `a`.
       - The returned `centers` array stores these anchor indices (kept for backwards compat).
 
-    Label convention (early warning):
-      - If horizon_n > 0, a window is positive if a drop occurs strictly in the future interval
-        (a, a + horizon_n].
-      - If horizon_n == 0, a window is positive if label_col is positive at the anchor `a`
-        (classic "detect-now" training).
+    Label convention (true early warning):
+      - Compute onset events from `label_col`.
+      - If horizon_n > 0, a window is positive iff a DROP ONSET happens strictly
+        in the future interval (a, a + horizon_n].
+      - If horizon_n == 0, a window is positive iff there is a DROP ONSET at the anchor `a`.
 
-    This supports true early-warning training while remaining causal.
+    This avoids the "easy" label leakage where any point inside an on-going drop
+    is treated as positive.
     """
     if window_n < 5:
         raise ValueError("window_n must be >= 5")
@@ -50,6 +68,8 @@ def make_windows(
     X_raw = df[cols].to_numpy(dtype=float)
     y_raw = df[label_col].to_numpy(dtype=float)
     n = len(df)
+
+    onsets = _drop_onsets(y_raw)
 
     # last usable anchor must leave room for a future horizon
     h = int(max(0, horizon_n))
@@ -74,9 +94,9 @@ def make_windows(
         if h > 0:
             fut_s = a + 1
             fut_e = min(n, a + 1 + h)
-            y[i] = 1.0 if float(np.nanmax(y_raw[fut_s:fut_e])) > 0.5 else 0.0
+            y[i] = 1.0 if bool(np.any(onsets[fut_s:fut_e])) else 0.0
         else:
-            y[i] = 1.0 if float(y_raw[a]) > 0.5 else 0.0
+            y[i] = 1.0 if bool(onsets[a]) else 0.0
 
     # Normalize per-channel robustly (median/IQR)
     med = np.nanmedian(X, axis=(0, 2), keepdims=True)

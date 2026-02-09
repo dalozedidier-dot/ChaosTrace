@@ -40,6 +40,9 @@ def infer_series(
     """Run causal sliding-window inference and return a per-timepoint score.
 
     The score is aligned to the window anchor index (the END of each past-only window).
+
+    IMPORTANT: the returned per-timepoint score is filled CAUSALLY (forward fill only).
+    That way, scores at time t never incorporate windows whose anchor is > t.
     """
     torch = _torch()
 
@@ -84,27 +87,18 @@ def infer_series(
             logits, _ = model(X[s:e])
             probs[s:e] = sigmoid_np(logits.detach().cpu().numpy())
 
-    score = np.full((len(df),), np.nan, dtype=float)
+    # Sparse per-anchor probabilities
+    score = np.zeros((len(df),), dtype=float)
+    anchor_mask = np.zeros((len(df),), dtype=bool)
     score[ds.centers] = probs
+    anchor_mask[ds.centers] = True
 
-    # fill gaps by simple nearest-neighbor forward/back fill
-    m = np.isfinite(score)
-    if np.any(m):
-        # forward fill
-        last = None
-        for i in range(len(score)):
-            if np.isfinite(score[i]):
-                last = float(score[i])
-            elif last is not None:
-                score[i] = last
-        # backward fill
-        last = None
-        for i in range(len(score) - 1, -1, -1):
-            if np.isfinite(score[i]):
-                last = float(score[i])
-            elif last is not None:
-                score[i] = last
-    else:
-        score[:] = 0.0
+    # Causal fill: forward only. Before first anchor -> 0.0.
+    last = 0.0
+    for i in range(len(score)):
+        if anchor_mask[i]:
+            last = float(score[i])
+        else:
+            score[i] = last
 
     return DLInferenceOutput(score=score, proba_window=probs, centers=ds.centers)

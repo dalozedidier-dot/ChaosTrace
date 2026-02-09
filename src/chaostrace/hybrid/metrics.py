@@ -28,21 +28,31 @@ def pointwise_prf(alert: np.ndarray, is_drop: np.ndarray) -> Dict[str, float]:
 
 
 def _events_from_mask(time_s: np.ndarray, mask: np.ndarray) -> List[Tuple[float, float]]:
+    """Return contiguous (start_time, end_time) segments where mask is True."""
     t = np.asarray(time_s, dtype=float)
     m = np.asarray(mask, dtype=bool)
     if t.shape != m.shape:
         raise ValueError("time_s and mask must have same shape")
+
     events: List[Tuple[float, float]] = []
+    if len(m) == 0:
+        return events
+
     in_ev = False
-    start = 0
+    start_idx = 0
     for i, v in enumerate(m):
         if v and not in_ev:
             in_ev = True
-            start = i
-        if in_ev and (not v or i == len(m) - 1):
-            end_idx = i if not v else i
-            events.append((float(t[start]), float(t[end_idx])))
+            start_idx = int(i)
+            continue
+        if in_ev and not v:
+            end_idx = int(i - 1)
+            events.append((float(t[start_idx]), float(t[end_idx])))
             in_ev = False
+
+    if in_ev:
+        events.append((float(t[start_idx]), float(t[-1])))
+
     return events
 
 
