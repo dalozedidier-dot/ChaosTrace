@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "chaostrace"
-version = "0.2.3"
+version = "0.2.4"
 description = "Sweep-based multivariate regime/anomaly detection for foiling sailboats (F50-like)."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -45,12 +45,12 @@ package-dir = {"" = "src"}
 line-length = 100
 target-version = "py311"
 
-[tool.ruff.lint.per-file-ignores]
-"notebooks/*.ipynb" = ["E401"]
-
 [tool.pytest.ini_options]
 addopts = "-q"
 testpaths = ["tests"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.ruff.lint.per-file-ignores]
+"notebooks/*.ipynb" = ["E401"]

@@ -1,3 +1,11 @@
+## 0.2.4
+
+- Fix sample-rate estimation for DL training (correct window/stride/horizon in samples)
+- Make DL windows causal and anchor-aligned for true early-warning labeling
+- Improve fusion threshold baseline (early segment) to avoid threshold inflation near events
+- Relax fusion threshold clamp (allow earlier alerts) and export alert_frac/threshold in metrics
+- Ruff: ignore E401 in notebooks
+
 # Changelog
 ## 0.2.2
 - Fix CI ruff error (unused import) in hybrid Matrix Profile module.

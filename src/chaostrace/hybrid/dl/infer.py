@@ -28,7 +28,7 @@ def _torch() -> Any:
 class DLInferenceOutput:
     score: np.ndarray  # per-timepoint [0,1] score aligned to df
     proba_window: np.ndarray  # per-window probabilities
-    centers: np.ndarray  # center indices into df
+    centers: np.ndarray  # anchor indices into df (window END indices)
 
 
 def infer_series(
@@ -37,7 +37,10 @@ def infer_series(
     model_dir: Path,
     device: str = "cpu",
 ) -> DLInferenceOutput:
-    """Run sliding-window inference and return a per-timepoint score."""
+    """Run causal sliding-window inference and return a per-timepoint score.
+
+    The score is aligned to the window anchor index (the END of each past-only window).
+    """
     torch = _torch()
 
     cfg_path = model_dir / "config.json"
@@ -81,8 +84,7 @@ def infer_series(
             logits, _ = model(X[s:e])
             probs[s:e] = sigmoid_np(logits.detach().cpu().numpy())
 
-    score = np.zeros((len(df),), dtype=float)
-    score[:] = np.nan
+    score = np.full((len(df),), np.nan, dtype=float)
     score[ds.centers] = probs
 
     # fill gaps by simple nearest-neighbor forward/back fill

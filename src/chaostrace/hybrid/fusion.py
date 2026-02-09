@@ -45,14 +45,25 @@ def fuse_scores(
     score_causal: Optional[np.ndarray] = None,
     score_dl: Optional[np.ndarray] = None,
     weights: Optional[dict[str, float]] = None,
+    # Baseline selection
     baseline_margin: float = 0.05,
+    baseline_s: float = 20.0,
+    baseline_frac: float = 0.20,
+    # Thresholding
     baseline_percentile: float = 99.5,
-    threshold_min: float = 0.55,
-    threshold_max: float = 0.97,
+    threshold_min: float = 0.10,
+    threshold_max: float = 0.99,
+    # Alert postprocessing
     merge_gap_s: float = 0.20,
     min_duration_s: float = 0.30,
 ) -> FusionOutput:
-    """Fuse multiple score streams into a final alert mask with dynamic thresholding."""
+    """Fuse multiple score streams into a final alert mask with dynamic thresholding.
+
+    Key correction for early warning:
+      - The threshold baseline is computed from an EARLY stable segment of the run,
+        instead of "all non-drop points". This prevents near-drop pre-alerts from
+        inflating the threshold and killing early warnings.
+    """
     from chaostrace.orchestrator.sweep import dynamic_threshold, postprocess_alerts
 
     t = np.asarray(time_s, dtype=float)
@@ -96,7 +107,20 @@ def fuse_scores(
         fused += float(w.get(k, 0.0)) * np.asarray(s, dtype=float)
     fused = np.clip(fused, 0.0, 1.0)
 
-    baseline_mask = (d < 0.5) & (foil > (float(drop_threshold) + float(baseline_margin)))
+    # Baseline: early stable segment
+    if len(t) >= 2:
+        duration = float(t[-1] - t[0])
+        baseline_len_s = float(max(baseline_s, baseline_frac * duration))
+        baseline_len_s = float(min(baseline_len_s, max(5.0, 0.5 * duration)))
+        t_end = float(t[0] + baseline_len_s)
+        baseline_mask = (
+            (t <= t_end)
+            & (d < 0.5)
+            & (foil > (float(drop_threshold) + float(baseline_margin)))
+        )
+    else:
+        baseline_mask = (d < 0.5) & (foil > (float(drop_threshold) + float(baseline_margin)))
+
     thr = dynamic_threshold(
         fused,
         baseline_mask,

@@ -104,6 +104,15 @@ def main() -> None:
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--early-window-s", type=float, default=2.0, help="Event-level early window")
 
+    # Fusion thresholding controls (useful for early warnings without inflating thresholds near events)
+    ap.add_argument("--baseline-s", type=float, default=20.0, help="Baseline length in seconds (early segment)")
+    ap.add_argument("--baseline-frac", type=float, default=0.20, help="Baseline length as fraction of run duration")
+    ap.add_argument("--baseline-percentile", type=float, default=99.5, help="Percentile used to set dynamic threshold")
+    ap.add_argument("--threshold-min", type=float, default=0.10, help="Min clamp for dynamic threshold")
+    ap.add_argument("--threshold-max", type=float, default=0.99, help="Max clamp for dynamic threshold")
+    ap.add_argument("--merge-gap-s", type=float, default=0.20, help="Merge gap for postprocessed alert events")
+    ap.add_argument("--min-duration-s", type=float, default=0.30, help="Min duration for alert events")
+
     args = ap.parse_args()
 
     df = load_timeseries(Path(args.input))
@@ -177,7 +186,15 @@ def main() -> None:
         score_mp=score_mp,
         score_causal=score_causal,
         score_dl=score_dl,
+        baseline_s=float(args.baseline_s),
+        baseline_frac=float(args.baseline_frac),
+        baseline_percentile=float(args.baseline_percentile),
+        threshold_min=float(args.threshold_min),
+        threshold_max=float(args.threshold_max),
+        merge_gap_s=float(args.merge_gap_s),
+        min_duration_s=float(args.min_duration_s),
     )
+
 
     alert = fused.alert_mask
     prf = pointwise_prf(alert, is_drop)
@@ -220,6 +237,8 @@ def main() -> None:
         "precision": prf["precision"],
         "recall": prf["recall"],
         "f1": prf["f1"],
+        "alert_frac": float(np.mean(alert.astype(float))),
+        "threshold": float(fused.threshold),
         "drop_events": ev.drop_events,
         "alert_events": ev.alert_events,
         "matched_drop_events": ev.matched_drop_events,
