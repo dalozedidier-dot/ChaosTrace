@@ -1,0 +1,41 @@
+name: rqa_multiscale
+
+on:
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: |
+          set -euo pipefail
+          python -m pip install -U pip
+          pip install -e ".[dev]"
+
+      - name: Multiscale RQA
+        run: |
+          set -euo pipefail
+          mkdir -p _ci_out/rqa_multiscale
+          python -m chaostrace.cli.rqa_multiscale \
+            --input test_data/sample_timeseries_1_2_drops.csv \
+            --out _ci_out/rqa_multiscale \
+            --scales 3,5,10,20 \
+            --series foil_height_m \
+            --cross \
+            --drop-threshold 0.30
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rqa_multiscale_out
+          path: _ci_out/
