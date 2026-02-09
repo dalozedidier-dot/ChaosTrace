@@ -238,7 +238,6 @@ def main() -> None:
         "recall": prf["recall"],
         "f1": prf["f1"],
         "alert_frac": float(np.mean(alert.astype(float))),
-        "threshold": float(fused.threshold),
         "drop_events": ev.drop_events,
         "alert_events": ev.alert_events,
         "matched_drop_events": ev.matched_drop_events,
