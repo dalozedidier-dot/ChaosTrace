@@ -16,12 +16,36 @@ on:
         required: false
         default: "7"
 
+permissions:
+  contents: read
+
 jobs:
   run:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout (standard)
+        id: checkout
+        uses: actions/checkout@v4
+        continue-on-error: true
+        with:
+          fetch-depth: 1
+
+      - name: Checkout fallback (GitHub archive)
+        if: steps.checkout.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          rm -rf .git || true
+          curl -L \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/tarball/${GITHUB_SHA}" \
+            -o repo.tgz
+          tar -xzf repo.tgz --strip-components=1
+          rm -f repo.tgz
+          test -f pyproject.toml
 
       - uses: actions/setup-python@v5
         with:
@@ -36,12 +60,32 @@ jobs:
       - name: Train lightweight DL model (early warning)
         run: |
           mkdir -p _ci_out/model
-          python -m chaostrace.cli.train_hybrid             --input test_data/sample_timeseries_1_2_drops.csv             --out _ci_out/model             --cols boat_speed,foil_height_m             --window-s 5.0             --stride-s 0.5             --horizon-s 1.0             --contrastive-epochs "${{ inputs.contrastive_epochs }}"             --supervised-epochs "${{ inputs.supervised_epochs }}"             --batch-size 64             --pos-weight 3.0             --device cpu
+          python -m chaostrace.cli.train_hybrid \
+            --input test_data/sample_timeseries_1_2_drops.csv \
+            --out _ci_out/model \
+            --cols boat_speed,foil_height_m \
+            --window-s 5.0 \
+            --stride-s 0.5 \
+            --horizon-s 1.0 \
+            --contrastive-epochs "${{ inputs.contrastive_epochs }}" \
+            --supervised-epochs "${{ inputs.supervised_epochs }}" \
+            --batch-size 64 \
+            --pos-weight 3.0 \
+            --device cpu
 
       - name: Run hybrid (chaos + DL)
         run: |
           mkdir -p _ci_out/hybrid_dl
-          python -m chaostrace.cli.run_hybrid             --input test_data/sample_timeseries_1_2_drops.csv             --out _ci_out/hybrid_dl             --runs 30             --seed "${{ inputs.seed }}"             --enable-causal             --causal-cols boat_speed,foil_height_m             --model _ci_out/model             --device cpu             --early-window-s 2.0
+          python -m chaostrace.cli.run_hybrid \
+            --input test_data/sample_timeseries_1_2_drops.csv \
+            --out _ci_out/hybrid_dl \
+            --runs 30 \
+            --seed "${{ inputs.seed }}" \
+            --enable-causal \
+            --causal-cols boat_speed,foil_height_m \
+            --model _ci_out/model \
+            --device cpu \
+            --early-window-s 2.0
 
       - name: Upload artifacts
         if: always()
