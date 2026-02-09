@@ -1,0 +1,42 @@
+name: hybrid_mp
+
+on:
+  workflow_dispatch:
+    inputs:
+      runs:
+        description: "Nombre de configs chaos évaluées avant fusion"
+        required: false
+        default: "30"
+      seed:
+        description: "Seed RNG"
+        required: false
+        default: "7"
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install -U pip
+          pip install -e ".[dev,mp]"
+
+      - name: Run hybrid (Matrix Profile)
+        run: |
+          mkdir -p _ci_out/hybrid_mp
+          python -m chaostrace.cli.run_hybrid             --input test_data/sample_timeseries_1_2_drops.csv             --out _ci_out/hybrid_mp             --runs "${{ inputs.runs }}"             --seed "${{ inputs.seed }}"             --enable-mp             --mp-col boat_speed
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hybrid_mp_out
+          path: _ci_out/
