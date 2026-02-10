@@ -313,12 +313,16 @@ def _pick_best(grid_rows: List[Dict[str, Any]], mode: str) -> int:
             return (silent, fp, -f1, alert_frac)
 
         if mode == "max_f1_event":
-            return (silent, -f1_event, fp, alert_frac)
+            # Maximize event F1, then prefer positive lead and fewer alert events.
+            lead_bad = 1.0 if lead_max <= 0.0 else 0.0
+            return (silent + lead_bad, -f1_event, -lead_max, alert_events, fp, alert_frac)
 
         if mode == "max_ew":
-            # Prioritize positive lead, then maximize lead, then maximize event-level F1.
+            # Early-warning selection must not sacrifice precision.
+            # We prioritize event-level F1 first, then positive lead, then lead magnitude.
             lead_bad = 1.0 if lead_max <= 0.0 else 0.0
-            return (silent + lead_bad, -lead_max, -f1_event, fp)
+            # Tie-breakers: fewer alert events and fewer FP.
+            return (silent + lead_bad, -f1_event, -lead_max, alert_events, fp, alert_frac)
 
         # min_alert_frac
         return (silent, alert_frac, fp, -f1)

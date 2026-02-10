@@ -41,7 +41,7 @@ jobs:
       - name: Run hybrid (chaos + DL)
         run: |
           mkdir -p _ci_out/hybrid_dl
-          python -m chaostrace.cli.run_hybrid             --input test_data/sample_timeseries_1_2_drops.csv             --out _ci_out/hybrid_dl             --runs 30             --seed "${{ inputs.seed }}"             --enable-causal             --causal-cols boat_speed,foil_height_m             --model _ci_out/model             --device cpu             --require-dl             --early-window-s 2.0             --baseline-percentile 99.0             --threshold-min 0.35             --merge-gap-s 0.30             --min-duration-s 0.10             --pick max_ew
+          python -m chaostrace.cli.run_hybrid             --input test_data/sample_timeseries_1_2_drops.csv             --out _ci_out/hybrid_dl             --runs 30             --seed "${{ inputs.seed }}"             --enable-causal             --causal-cols boat_speed,foil_height_m             --model _ci_out/model             --device cpu             --require-dl             --early-window-s 2.0             --baseline-percentile 99.0             --threshold-min 0.38             --merge-gap-s 0.30             --min-duration-s 0.10             --pick max_ew
 
       - name: Assert early-warning (event F1 + lead)
         run: |
