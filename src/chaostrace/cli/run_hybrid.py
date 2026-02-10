@@ -227,6 +227,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--baseline-percentile", type=float, default=99.5)
     p.add_argument("--threshold-min", type=float, default=0.55)
     p.add_argument("--threshold-max", type=float, default=0.97)
+    p.add_argument("--gate-dl", type=float, default=0.0, help="Component gate for DL score (0 disables).")
+    p.add_argument("--gate-causal", type=float, default=0.0, help="Component gate for causal score (0 disables).")
+    p.add_argument("--gate-chaos", type=float, default=0.0, help="Component gate for chaos score (0 disables).")
     p.add_argument("--merge-gap-s", type=float, default=0.20)
     p.add_argument("--min-duration-s", type=float, default=0.30)
 
@@ -436,6 +439,16 @@ def main(argv: Optional[List[str]] = None) -> int:
             thr_max=float(args.threshold_max),
         )
         alert_raw = fused > float(thr)
+        # Optional component gating to reduce spurious alert islands:
+        # keep an alert point only if at least one component is "strong enough".
+        gate_any = (float(args.gate_chaos) > 0.0) or (float(args.gate_dl) > 0.0) or (float(args.gate_causal) > 0.0)
+        if gate_any:
+            support = np.asarray(score_chaos, dtype=float) >= float(args.gate_chaos)
+            if score_dl is not None:
+                support = support | (np.asarray(score_dl, dtype=float) >= float(args.gate_dl))
+            if score_causal is not None:
+                support = support | (np.asarray(score_causal, dtype=float) >= float(args.gate_causal))
+            alert_raw = alert_raw & support
         alert, alert_events = _postprocess_alerts(
             alert_raw,
             t,
@@ -588,6 +601,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         "threshold": float(thr),
         "threshold_min": float(args.threshold_min),
         "threshold_max": float(args.threshold_max),
+        "gate_dl": float(args.gate_dl),
+        "gate_causal": float(args.gate_causal),
+        "gate_chaos": float(args.gate_chaos),
         "merge_gap_s": float(args.merge_gap_s),
         "min_duration_s": float(args.min_duration_s),
         "alert_events": int(alert_events),
