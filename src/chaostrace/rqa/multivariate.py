@@ -10,7 +10,7 @@ that may precede or accompany drops.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional
 
 import numpy as np
 import scipy.spatial.distance as ssd
