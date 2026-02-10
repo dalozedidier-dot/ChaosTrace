@@ -11,9 +11,11 @@ def pointwise_prf(alert: np.ndarray, is_drop: np.ndarray) -> Dict[str, float]:
     d = np.asarray(is_drop, dtype=bool)
     if a.shape != d.shape:
         raise ValueError("alert and is_drop must have same shape")
+
     tp = int(np.sum(a & d))
     fp = int(np.sum(a & ~d))
     fn = int(np.sum(~a & d))
+
     prec = tp / (tp + fp) if (tp + fp) > 0 else 0.0
     rec = tp / (tp + fn) if (tp + fn) > 0 else 0.0
     f1 = (2.0 * prec * rec / (prec + rec)) if (prec + rec) > 0 else 0.0
@@ -28,32 +30,27 @@ def pointwise_prf(alert: np.ndarray, is_drop: np.ndarray) -> Dict[str, float]:
 
 
 def _events_from_mask(time_s: np.ndarray, mask: np.ndarray) -> List[Tuple[float, float]]:
-    """Return contiguous (start_time, end_time) segments where mask is True."""
     t = np.asarray(time_s, dtype=float)
     m = np.asarray(mask, dtype=bool)
     if t.shape != m.shape:
         raise ValueError("time_s and mask must have same shape")
 
     events: List[Tuple[float, float]] = []
-    if len(m) == 0:
-        return events
-
     in_ev = False
-    start_idx = 0
+    start = 0
     for i, v in enumerate(m):
         if v and not in_ev:
             in_ev = True
-            start_idx = int(i)
-            continue
-        if in_ev and not v:
-            end_idx = int(i - 1)
-            events.append((float(t[start_idx]), float(t[end_idx])))
+            start = i
+        if in_ev and (not v or i == len(m) - 1):
+            end_idx = i if not v else i
+            events.append((float(t[start]), float(t[end_idx])))
             in_ev = False
-
-    if in_ev:
-        events.append((float(t[start_idx]), float(t[-1])))
-
     return events
+
+
+def _overlaps(a0: float, a1: float, b0: float, b1: float) -> bool:
+    return (a1 >= b0) and (a0 <= b1)
 
 
 @dataclass(frozen=True)
@@ -74,16 +71,19 @@ def event_level_metrics(
     *,
     early_window_s: float = 2.0,
 ) -> EventMetrics:
-    """Compute event-level metrics and early-warning lead times.
+    """Event-level metrics with overlap-aware matching and early-warning leads.
 
-    A drop event is a contiguous segment where is_drop is True.
-    An alert event is a contiguous segment where alert is True.
+    Definitions
+    - drop event: contiguous segment where is_drop is True
+    - alert event: contiguous segment where alert is True
 
-    A drop event is considered "matched" if there exists an alert event
-    whose START time is within [t_drop_start - early_window_s, t_drop_start].
+    Matching
+    A drop event is considered detected if any alert event overlaps it.
+    Separately, a drop event has an early warning lead if there exists an alert event
+    whose start time ta0 is within [td0 - early_window_s, td0].
 
-    Precision is computed over alert events: an alert event is "good" if it matches
-    at least one drop event under the same rule.
+    This avoids reporting 0 event recall when alerts start slightly after td0 but still
+    overlap the drop.
     """
     t = np.asarray(time_s, dtype=float)
     a = np.asarray(alert, dtype=bool)
@@ -92,56 +92,51 @@ def event_level_metrics(
     drop_events = _events_from_mask(t, d)
     alert_events = _events_from_mask(t, a)
 
-    # Match drops -> alerts (greedy: pick earliest alert in window)
+    # Drop detection by overlap
     matched_drops = 0
-    leads: List[float] = []
-
-    used_alert = [False] * len(alert_events)
-    for (td0, _td1) in drop_events:
-        best_j = None
-        best_lead = None
-        for j, (ta0, _ta1) in enumerate(alert_events):
-            if used_alert[j]:
-                continue
-            lead = td0 - ta0
-            if lead < 0:
-                continue
-            if lead <= float(early_window_s):
-                if best_lead is None or lead > best_lead:
-                    best_lead = float(lead)
-                    best_j = j
-        if best_j is not None:
-            used_alert[best_j] = True
+    for (td0, td1) in drop_events:
+        if any(_overlaps(ta0, ta1, td0, td1) for (ta0, ta1) in alert_events):
             matched_drops += 1
+
+    # Early-warning leads (only when alert starts before drop start)
+    leads: List[float] = []
+    for (td0, _td1) in drop_events:
+        best_lead = None
+        for (ta0, _ta1) in alert_events:
+            lead = float(td0 - ta0)
+            if 0.0 <= lead <= float(early_window_s):
+                if best_lead is None or lead > best_lead:
+                    best_lead = lead
+        if best_lead is not None:
             leads.append(float(best_lead))
 
-    # Alert-event precision: any alert that has a drop within window ahead?
+    # Alert-event precision: good if overlaps any drop, or if it is an early warning for a drop.
     good_alerts = 0
-    for (ta0, _ta1) in alert_events:
+    for (ta0, ta1) in alert_events:
         ok = False
-        for (td0, _td1) in drop_events:
-            lead = td0 - ta0
+        for (td0, td1) in drop_events:
+            if _overlaps(ta0, ta1, td0, td1):
+                ok = True
+                break
+            lead = float(td0 - ta0)
             if 0.0 <= lead <= float(early_window_s):
                 ok = True
                 break
-        good_alerts += 1 if ok else 0
+        if ok:
+            good_alerts += 1
 
     drop_event_recall = matched_drops / len(drop_events) if drop_events else 0.0
     alert_event_precision = good_alerts / len(alert_events) if alert_events else 0.0
 
-    if leads:
-        lead_med = float(np.median(np.asarray(leads, dtype=float)))
-        lead_max = float(np.max(np.asarray(leads, dtype=float)))
-    else:
-        lead_med = 0.0
-        lead_max = 0.0
+    lead_s_median = float(np.median(leads)) if leads else 0.0
+    lead_s_max = float(np.max(leads)) if leads else 0.0
 
     return EventMetrics(
-        drop_events=int(len(drop_events)),
-        alert_events=int(len(alert_events)),
+        drop_events=len(drop_events),
+        alert_events=len(alert_events),
         matched_drop_events=int(matched_drops),
         drop_event_recall=float(drop_event_recall),
         alert_event_precision=float(alert_event_precision),
-        lead_s_median=float(lead_med),
-        lead_s_max=float(lead_max),
+        lead_s_median=float(lead_s_median),
+        lead_s_max=float(lead_s_max),
     )

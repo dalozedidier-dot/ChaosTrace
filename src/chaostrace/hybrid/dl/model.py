@@ -22,67 +22,81 @@ class ModelConfig:
     dropout: float = 0.10
 
 
-def _require_torch() -> None:
-    if torch is None or nn is None:
-        raise RuntimeError(
-            "This feature requires optional dependency 'torch'. "
-            "Install with: pip install -e '.[dl]'"
-        )
+def _torch_missing_error() -> RuntimeError:
+    return RuntimeError(
+        "This feature requires optional dependency 'torch'. "
+        "Install with: pip install -e '.[dl]'"
+    )
 
 
-class HybridNet(nn.Module):
-    """Lightweight Conv + Transformer encoder for window classification.
+# Important: this module must remain importable without torch installed,
+# because the base CI imports CLI modules without optional extras.
+if nn is None:
 
-    Outputs:
-      - logits: (N,)
-      - emb: (N, d_model) pooled representation
-    """
+    class HybridNet:  # type: ignore[too-few-public-methods]
+        def __init__(self, cfg: ModelConfig) -> None:
+            raise _torch_missing_error()
 
-    def __init__(self, cfg: ModelConfig) -> None:
-        _require_torch()
-        super().__init__()
-        self.cfg = cfg
+        def forward(self, x: "torch.Tensor") -> tuple["torch.Tensor", "torch.Tensor"]:  # pragma: no cover
+            raise _torch_missing_error()
 
-        self.conv = nn.Sequential(
-            nn.Conv1d(cfg.n_channels, cfg.d_model, kernel_size=5, padding=2),
-            nn.GELU(),
-            nn.Conv1d(cfg.d_model, cfg.d_model, kernel_size=3, padding=1),
-            nn.GELU(),
-        )
+        def embed(self, x: "torch.Tensor") -> "torch.Tensor":  # pragma: no cover
+            raise _torch_missing_error()
 
-        enc_layer = nn.TransformerEncoderLayer(
-            d_model=cfg.d_model,
-            nhead=cfg.n_heads,
-            dim_feedforward=cfg.d_model * 4,
-            dropout=cfg.dropout,
-            batch_first=False,
-            activation="gelu",
-        )
-        self.encoder = nn.TransformerEncoder(enc_layer, num_layers=cfg.n_layers)
+else:
 
-        self.norm = nn.LayerNorm(cfg.d_model)
-        self.head = nn.Linear(cfg.d_model, 1)
+    class HybridNet(nn.Module):
+        """Lightweight Conv + Transformer encoder for window classification.
 
-        self.proj = nn.Sequential(
-            nn.Linear(cfg.d_model, cfg.d_model),
-            nn.GELU(),
-            nn.Linear(cfg.d_model, cfg.d_model),
-        )
+        Outputs
+        - logits: (N,)
+        - emb: (N, d_model) pooled representation
+        """
 
-    def forward(self, x: "torch.Tensor") -> tuple["torch.Tensor", "torch.Tensor"]:
-        # x: (N, C, L)
-        h = self.conv(x)  # (N, D, L)
-        h = h.permute(2, 0, 1)  # (L, N, D)
-        h = self.encoder(h)  # (L, N, D)
-        h = h.mean(dim=0)  # (N, D)
-        h = self.norm(h)
-        logits = self.head(h).squeeze(-1)  # (N,)
-        return logits, h
+        def __init__(self, cfg: ModelConfig) -> None:
+            super().__init__()
+            self.cfg = cfg
 
-    def embed(self, x: "torch.Tensor") -> "torch.Tensor":
-        _, h = self.forward(x)
-        z = self.proj(h)
-        return nn.functional.normalize(z, dim=-1)
+            self.conv = nn.Sequential(
+                nn.Conv1d(cfg.n_channels, cfg.d_model, kernel_size=5, padding=2),
+                nn.GELU(),
+                nn.Conv1d(cfg.d_model, cfg.d_model, kernel_size=3, padding=1),
+                nn.GELU(),
+            )
+
+            enc_layer = nn.TransformerEncoderLayer(
+                d_model=cfg.d_model,
+                nhead=cfg.n_heads,
+                dim_feedforward=cfg.d_model * 4,
+                dropout=cfg.dropout,
+                batch_first=False,
+                activation="gelu",
+            )
+            self.encoder = nn.TransformerEncoder(enc_layer, num_layers=cfg.n_layers)
+
+            self.norm = nn.LayerNorm(cfg.d_model)
+            self.head = nn.Linear(cfg.d_model, 1)
+
+            self.proj = nn.Sequential(
+                nn.Linear(cfg.d_model, cfg.d_model),
+                nn.GELU(),
+                nn.Linear(cfg.d_model, cfg.d_model),
+            )
+
+        def forward(self, x: "torch.Tensor") -> tuple["torch.Tensor", "torch.Tensor"]:
+            # x: (N, C, L)
+            h = self.conv(x)  # (N, D, L)
+            h = h.permute(2, 0, 1)  # (L, N, D)
+            h = self.encoder(h)  # (L, N, D)
+            h = h.mean(dim=0)  # (N, D)
+            h = self.norm(h)
+            logits = self.head(h).squeeze(-1)  # (N,)
+            return logits, h
+
+        def embed(self, x: "torch.Tensor") -> "torch.Tensor":
+            _, h = self.forward(x)
+            z = self.proj(h)
+            return nn.functional.normalize(z, dim=-1)
 
 
 def sigmoid_np(x: np.ndarray) -> np.ndarray:
