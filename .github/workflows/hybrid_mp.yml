@@ -17,7 +17,28 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout (standard)
+        id: checkout
+        uses: actions/checkout@v4
+        continue-on-error: true
+        with:
+          fetch-depth: 1
+
+      - name: Checkout fallback (GitHub archive)
+        if: steps.checkout.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          rm -rf .git || true
+          curl -L \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/tarball/${GITHUB_SHA}" \
+            -o repo.tgz
+          tar -xzf repo.tgz --strip-components=1
+          rm -f repo.tgz
+          test -f pyproject.toml
 
       - uses: actions/setup-python@v5
         with:
@@ -26,13 +47,26 @@ jobs:
 
       - name: Install
         run: |
+          set -euo pipefail
+          python scripts/assert_extras.py mp
           python -m pip install -U pip
           pip install -e ".[dev,mp]"
+          python - <<'PY'
+          import stumpy
+          print("stumpy:", stumpy.__version__)
+          PY
 
       - name: Run hybrid (Matrix Profile)
         run: |
           mkdir -p _ci_out/hybrid_mp
-          python -m chaostrace.cli.run_hybrid             --input test_data/sample_timeseries_1_2_drops.csv             --out _ci_out/hybrid_mp             --runs "${{ inputs.runs }}"             --seed "${{ inputs.seed }}"             --enable-mp             --mp-col boat_speed
+          python -m chaostrace.cli.run_hybrid \
+            --input test_data/sample_timeseries_1_2_drops.csv \
+            --out _ci_out/hybrid_mp \
+            --runs "${{ inputs.runs }}" \
+            --seed "${{ inputs.seed }}" \
+            --enable-mp \
+            --require-mp \
+            --mp-col boat_speed
 
       - name: Upload artifacts
         if: always()

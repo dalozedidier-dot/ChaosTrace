@@ -33,6 +33,10 @@ from chaostrace.rqa.multivariate import CrossRQAConfig, compute_cross_rqa
 
 
 def _parse_scales(s: str) -> List[float]:
+    s = str(s).strip().lower()
+    if s == "auto":
+        return []
+
     out: List[float] = []
     for part in s.split(","):
         part = part.strip()
@@ -42,6 +46,40 @@ def _parse_scales(s: str) -> List[float]:
     if not out:
         raise ValueError("Empty --scales")
     return out
+
+
+def _auto_scales_s(
+    *,
+    hz: float,
+    n_points: int,
+    emb_dim: int,
+    emb_lag: int,
+) -> List[float]:
+    """Pick defensible scales in seconds.
+
+    Many telemetry files are low frequency (ex: 4 Hz). Very short windows like
+    3 s would then contain ~12 points and make any embedding-based RQA unstable
+    (or degenerate to zeros). We compute a minimum window length based on the
+    embedding and return a small geometric set of scales.
+    """
+
+    hz = float(max(hz, 1e-6))
+
+    # Heuristic: need enough points for embedding and for recurrence structure.
+    min_points = max(80, 4 * (int(emb_dim) - 1) * int(emb_lag) + 20)
+    base_s = int(np.ceil(min_points / hz))
+    base_s = max(base_s, 10)
+
+    total_s = int(np.floor(n_points / hz))
+    scales: List[int] = []
+    for k in (1, 2, 4, 8):
+        s = base_s * k
+        if s < total_s:
+            scales.append(s)
+
+    scales = sorted(set(scales))
+    # Keep at most 4 scales to control runtime.
+    return [float(s) for s in scales[:4]]
 
 
 def _iqr(x: np.ndarray) -> float:
@@ -117,7 +155,14 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="ChaosTrace: multiscale RQA (windowed) with early warning score.")
     p.add_argument("--input", required=True, help="CSV input with time_s and series columns.")
     p.add_argument("--out", required=True, help="Output directory.")
-    p.add_argument("--scales", default="3,5,10,20", help="Comma-separated window scales in seconds.")
+    p.add_argument(
+        "--scales",
+        default="auto",
+        help=(
+            "Comma-separated window scales in seconds, or 'auto'. "
+            "Auto picks defensible windows based on sample rate and embedding."
+        ),
+    )
     p.add_argument("--series", default="foil_height_m", help="Primary series for RQA.")
     p.add_argument("--drop-threshold", type=float, default=0.30, help="Threshold defining drop regime (for summary stats).")
     p.add_argument("--emb-dim", type=int, default=5)
@@ -148,6 +193,13 @@ def main(argv: List[str] | None = None) -> int:
         hz = 10.0
 
     scales = _parse_scales(str(args.scales))
+    if not scales:
+        scales = _auto_scales_s(
+            hz=float(hz),
+            n_points=int(len(df)),
+            emb_dim=int(args.emb_dim),
+            emb_lag=int(args.emb_lag),
+        )
 
     adv_cfg = RQAAdvancedConfig(
         emb_dim=int(args.emb_dim),
@@ -168,9 +220,21 @@ def main(argv: List[str] | None = None) -> int:
 
     all_rows: List[Dict[str, Any]] = []
     per_scale_out: Dict[str, str] = {}
+    skipped_scales: List[Dict[str, Any]] = []
+
+    min_points = max(80, 4 * (int(args.emb_dim) - 1) * int(args.emb_lag) + 20)
 
     for s in scales:
         window_n = int(max(10, round(float(s) * float(hz))))
+        if window_n < int(min_points):
+            skipped_scales.append(
+                {
+                    "scale_s": float(s),
+                    "window_n": int(window_n),
+                    "min_points": int(min_points),
+                }
+            )
+            continue
         stride_n = max(1, int(round(0.20 * float(hz))))
         rows: List[Dict[str, Any]] = []
 
@@ -272,12 +336,21 @@ def main(argv: List[str] | None = None) -> int:
         fig.savefig(str(plot_path), dpi=180)
         plt.close(fig)
 
+    if not all_rows:
+        raise RuntimeError(
+            "No RQA windows computed. All requested scales were too small for the embedding; "
+            "use larger --scales or --scales auto."
+        )
+
     # Summary with a simple lead-time estimate on the smallest scale
     df_all = pd.DataFrame(all_rows)
     summary: Dict[str, Any] = {
         "input": str(args.input),
         "out": str(args.out),
+        "sample_hz": float(hz),
         "scales_s": scales,
+        "min_points": int(min_points),
+        "skipped_scales": skipped_scales,
         "series": str(args.series),
         "drop_threshold": float(args.drop_threshold),
         "cross_enabled": bool(args.cross),
