@@ -549,6 +549,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         thr_max=float(args.threshold_max),
     )
     alert_raw = fused > float(thr)
+    # Apply component gating (same as during grid evaluation) to avoid spurious alert islands.
+    gate_any = (float(args.gate_chaos) > 0.0) or (float(args.gate_dl) > 0.0) or (float(args.gate_causal) > 0.0)
+    if gate_any:
+        support = np.asarray(score_chaos, dtype=float) >= float(args.gate_chaos)
+        if score_dl is not None:
+            support = support | (np.asarray(score_dl, dtype=float) >= float(args.gate_dl))
+        if score_causal is not None:
+            support = support | (np.asarray(score_causal, dtype=float) >= float(args.gate_causal))
+        alert_raw = alert_raw & support
     alert, alert_events = _postprocess_alerts(
         alert_raw,
         t,
