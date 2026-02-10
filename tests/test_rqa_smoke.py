@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import numpy as np
-
 from chaostrace.data.ingest import load_timeseries
 from chaostrace.rqa.advanced import RQAAdvancedConfig, compute_rqa_advanced_from_series
 from chaostrace.rqa.multivariate import CrossRQAConfig, compute_cross_rqa

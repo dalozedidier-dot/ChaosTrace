@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """CLI: multiscale RQA over sliding windows.
 
 Example
@@ -18,6 +16,7 @@ Outputs
 - rqa_multiscale_summary.json
 """
 
+from __future__ import annotations
 import argparse
 import json
 from pathlib import Path

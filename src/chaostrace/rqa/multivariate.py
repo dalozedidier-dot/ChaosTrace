@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Multivariate and Cross-RQA helpers.
 
 - mdRQA: build a multivariate embedding and compute RQA metrics on the joint state.
@@ -9,6 +7,7 @@ The intent is to capture changes in coupling (e.g., foil_height vs boat_speed)
 that may precede or accompany drops.
 """
 
+from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 

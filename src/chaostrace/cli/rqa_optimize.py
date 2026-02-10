@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """CLI: optimize RQA parameters (grid or optuna).
 
 This tool helps you stop hand-tuning (m, tau, rr_target) by producing a
@@ -18,6 +16,7 @@ python -m chaostrace.cli.rqa_optimize \
   --objective delta_det
 """
 
+from __future__ import annotations
 import argparse
 import json
 from dataclasses import dataclass

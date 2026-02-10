@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Helpers to choose defensible embedding and recurrence parameters.
 
 RQA outputs can be sensitive to:
@@ -14,11 +12,10 @@ The intent is to give "good enough" defaults that are reproducible and
 auditable. They are heuristic and not meant to replace careful analysis.
 """
 
-from dataclasses import dataclass
+from __future__ import annotations
 from typing import Literal
 
 import numpy as np
-from scipy.spatial import cKDTree
 
 
 TauMethod = Literal["autocorr", "ami"]
@@ -161,6 +158,7 @@ def estimate_m_fnn(
         except ValueError:
             return int(max(2, m))
 
+        from scipy.spatial import cKDTree
         tree = cKDTree(emb_m)
         dists, idxs = tree.query(emb_m, k=2, workers=-1)
         # nearest neighbor excluding self
