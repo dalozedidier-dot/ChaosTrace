@@ -35,23 +35,9 @@ def _github_ctx() -> dict[str, str]:
         v = os.environ.get(k)
         if v is not None:
             out[k.lower()] = v
-    # Keep backward compatible field names seen in existing artifacts
-    remap = {
-        "github_repository": "github_repository",
-        "github_sha": "github_sha",
-        "github_ref": "github_ref",
-        "github_workflow": "github_workflow",
-        "github_job": "github_job",
-        "github_run_id": "github_run_id",
-        "github_run_number": "github_run_number",
-        "github_run_attempt": "github_run_attempt",
-        "github_actor": "github_actor",
-        "runner_os": "runner_os",
-        "runner_arch": "runner_arch",
-    }
     fixed: dict[str, str] = {}
     for k, v in out.items():
-        fixed[remap.get(k, k)] = v
+        fixed[k] = v
     return fixed
 
 
@@ -61,22 +47,14 @@ def _parse_params(items: list[str]) -> dict[str, Any]:
         if "=" not in it:
             raise SystemExit(f"--param expects key=value, got: {it!r}")
         k, v = it.split("=", 1)
-        k = k.strip()
-        v = v.strip()
-        # Keep as string; users can interpret later
-        out[k] = v
+        out[k.strip()] = v.strip()
     return out
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Emit a stable CI manifest (sha256, sizes, context).")
     ap.add_argument("--out-dir", required=True, help="Directory to write manifest_ci.json into")
-    ap.add_argument(
-        "--files",
-        nargs="+",
-        default=[],
-        help="File paths relative to out-dir (or absolute). Non-existing are recorded with exists=false.",
-    )
+    ap.add_argument("--files", nargs="+", default=[], help="Files relative to out-dir (or absolute)")
     ap.add_argument("--param", action="append", default=[], help="Extra key=value params")
     args = ap.parse_args()
 
@@ -89,13 +67,14 @@ def main() -> int:
         if not p.is_absolute():
             p = (out_dir / rel).resolve()
         exists = p.exists() and p.is_file()
-        rec = {
-            "path": rel,
-            "exists": bool(exists),
-            "bytes": int(p.stat().st_size) if exists else 0,
-            "sha256": _sha256(p) if exists else None,
-        }
-        files.append(rec)
+        files.append(
+            {
+                "path": rel,
+                "exists": bool(exists),
+                "bytes": int(p.stat().st_size) if exists else 0,
+                "sha256": _sha256(p) if exists else None,
+            }
+        )
 
     payload = {
         "schema_version": 1,

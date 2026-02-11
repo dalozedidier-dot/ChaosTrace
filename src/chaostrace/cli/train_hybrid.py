@@ -23,7 +23,7 @@ def main() -> None:
         "--horizon-s",
         type=float,
         default=1.0,
-        help="Early warning horizon: label is 1 if a drop occurs within this *future* window",
+        help="Early warning horizon: label is 1 if a drop occurs within this future window",
     )
 
     ap.add_argument("--drop-threshold", type=float, default=0.35, help="For autolabeling if is_drop missing")
@@ -39,11 +39,10 @@ def main() -> None:
 
     df = load_timeseries(Path(args.input))
 
-    # IMPORTANT: estimate_sample_hz expects a time axis, not the full dataframe
     if "time_s" in df.columns:
-        hz = estimate_sample_hz(df["time_s"])
+        hz = float(estimate_sample_hz(df["time_s"]))
     else:
-        hz = estimate_sample_hz(df.index.to_numpy())
+        hz = float(estimate_sample_hz(df.index.to_numpy()))
 
     if "is_drop" not in df.columns:
         res = markov_drop(df, drop_threshold=float(args.drop_threshold))
