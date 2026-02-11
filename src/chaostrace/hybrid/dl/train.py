@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import random
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -9,47 +10,6 @@ import numpy as np
 import pandas as pd
 
 from .dataset import make_windows
-
-import random
-
-
-def _seed_all(seed: int) -> None:
-    """Best-effort determinism across python/numpy/torch.
-
-    Notes:
-    - CI uses CPU by default; we also set CUDA seeds defensively.
-    - We avoid crashing if deterministic algorithms are unsupported.
-    """
-    torch = _torch()
-    s = int(seed)
-    random.seed(s)
-    np.random.seed(s)
-
-    try:
-        torch.manual_seed(s)
-        if torch.cuda.is_available():  # pragma: no cover
-            torch.cuda.manual_seed_all(s)
-    except Exception:  # pragma: no cover
-        pass
-
-    # Best effort deterministic behavior
-    try:
-        torch.use_deterministic_algorithms(True)
-    except Exception:  # pragma: no cover
-        pass
-    try:
-        torch.backends.cudnn.deterministic = True  # type: ignore[attr-defined]
-        torch.backends.cudnn.benchmark = False  # type: ignore[attr-defined]
-    except Exception:  # pragma: no cover
-        pass
-
-    # Stabilize CPU threading where possible
-    try:
-        torch.set_num_threads(1)
-        torch.set_num_interop_threads(1)
-    except Exception:  # pragma: no cover
-        pass
-
 from .model import HybridNet, ModelConfig
 
 
@@ -65,6 +25,38 @@ def _torch() -> Any:
         ) from e
 
 
+
+def _seed_all(seed: int) -> None:
+    """Best-effort determinism across python/numpy/torch."""
+    s = int(seed)
+    random.seed(s)
+    np.random.seed(s)
+
+    torch = _torch()
+    try:
+        torch.manual_seed(s)
+        if torch.cuda.is_available():  # pragma: no cover
+            torch.cuda.manual_seed_all(s)
+    except Exception:  # pragma: no cover
+        pass
+
+    # Best effort deterministic behavior
+    try:  # pragma: no cover
+        torch.use_deterministic_algorithms(True)
+    except Exception:  # pragma: no cover
+        pass
+    try:  # pragma: no cover
+        torch.backends.cudnn.deterministic = True  # type: ignore[attr-defined]
+        torch.backends.cudnn.benchmark = False  # type: ignore[attr-defined]
+    except Exception:  # pragma: no cover
+        pass
+
+    # Stabilize CPU threading where possible
+    try:  # pragma: no cover
+        torch.set_num_threads(1)
+        torch.set_num_interop_threads(1)
+    except Exception:  # pragma: no cover
+        pass
 def _augment(x: "Any") -> "Any":
     """Simple augmentations for contrastive pretraining."""
     torch = _torch()
@@ -121,7 +113,6 @@ def train_hybrid_model(
     The model is saved to <out_dir>/model.pt and config to <out_dir>/config.json.
     """
     torch = _torch()
-    _seed_all(int(seed))
     out_dir.mkdir(parents=True, exist_ok=True)
 
     ds = make_windows(
