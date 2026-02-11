@@ -36,7 +36,7 @@ jobs:
             --baseline-s 60 \
             --early-threshold-mode pctl \
             --early-threshold-quantile 0.995 \
-            --early-threshold-floor 0.0 \
+            --early-threshold-floor 0.05 \
             --stride-s 0.5 \
             --max-windows 1500
 
