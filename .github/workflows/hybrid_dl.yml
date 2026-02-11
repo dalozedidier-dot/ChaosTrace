@@ -141,5 +141,5 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: hybrid_dl_out
+          name: hybrid_dl_out_run${{ github.run_id }}_a${{ github.run_attempt }}
           path: _ci_out/

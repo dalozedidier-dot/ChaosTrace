@@ -65,7 +65,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ci_out_${{ matrix.python-version }}
+          name: ci_out_py${{ matrix.python-version }}_run${{ github.run_id }}_a${{ github.run_attempt }}
           path: _ci_out/
 
   hybrid_core:
@@ -112,5 +112,5 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: hybrid_core_out
+          name: hybrid_core_out_run${{ github.run_id }}_a${{ github.run_attempt }}
           path: _ci_out/
