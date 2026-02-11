@@ -1,0 +1,96 @@
+name: Viz Pack (cinematic)
+
+on:
+  workflow_dispatch:
+    inputs:
+      input_csv:
+        description: "CSV d'entrée. Par défaut: test_data/sample_timeseries_1_2_drops.csv"
+        required: false
+        default: "test_data/sample_timeseries_1_2_drops.csv"
+      runs:
+        description: "Nombre de configs sweep (petit = rapide)."
+        required: false
+        default: "30"
+      seed:
+        description: "Seed RNG."
+        required: false
+        default: "7"
+      python_version:
+        description: "Version Python."
+        required: false
+        default: "3.12"
+      make_animation:
+        description: "true/false: génère aussi une animation (plus lourd)."
+        required: false
+        default: "false"
+      export_png:
+        description: "true/false: export PNG (kaleido requis)."
+        required: false
+        default: "false"
+
+permissions:
+  contents: read
+
+jobs:
+  viz-pack:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python_version }}
+          cache: pip
+
+      - name: Install
+        run: |
+          set -e
+          python -V
+          python -m pip install -U pip wheel
+          pip install -e ".[dev]" || pip install -e "."
+          if [ -f requirements_viz.txt ]; then
+            pip install -r requirements_viz.txt
+          fi
+
+      - name: Run sweep demo
+        run: |
+          set -e
+          mkdir -p _ci_out/viz_demo
+          python -m chaostrace.cli.run_sweep \
+            --input "${{ inputs.input_csv }}" \
+            --out _ci_out/viz_demo \
+            --runs "${{ inputs.runs }}" \
+            --seed "${{ inputs.seed }}"
+
+      - name: Generate cinematic viz
+        run: |
+          set -e
+          EXTRA=""
+          if [ "${{ inputs.make_animation }}" = "true" ]; then
+            EXTRA="$EXTRA --make-animation"
+          fi
+          if [ "${{ inputs.export_png }}" = "true" ]; then
+            EXTRA="$EXTRA --export-png"
+          fi
+          python -m chaostrace.cli.viz_cinematic \
+            --run-dir _ci_out/viz_demo \
+            $EXTRA
+
+      - name: Zip viz pack
+        run: |
+          set -e
+          test -d _ci_out/viz_demo/viz_cinematic
+          zip -r "viz_cinematic_${{ github.run_id }}.zip" "_ci_out/viz_demo/viz_cinematic"
+
+      - name: Upload artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: viz_cinematic_${{ github.run_id }}
+          path: |
+            viz_cinematic_${{ github.run_id }}.zip
+            _ci_out/viz_demo/viz_cinematic/
+          if-no-files-found: error
