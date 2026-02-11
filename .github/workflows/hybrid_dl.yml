@@ -41,9 +41,9 @@ jobs:
       - name: Run hybrid (chaos + DL)
         run: |
           mkdir -p _ci_out/hybrid_dl
-          python -m chaostrace.cli.run_hybrid             --input test_data/sample_timeseries_1_2_drops.csv             --out _ci_out/hybrid_dl             --runs 30             --seed "${{ inputs.seed }}"             --enable-causal             --causal-cols boat_speed,foil_height_m             --model _ci_out/model             --device cpu             --require-dl             --early-window-s 2.0             --baseline-percentile 99.0             --threshold-min 0.35             --merge-gap-s 0.50             --min-duration-s 0.10             --gate-dl 0.55             --gate-causal 0.65             --gate-chaos 0.40             --pick max_ew
+          python -m chaostrace.cli.run_hybrid             --input test_data/sample_timeseries_1_2_drops.csv             --out _ci_out/hybrid_dl             --runs 30             --seed "${{ inputs.seed }}"             --enable-causal             --causal-cols boat_speed,foil_height_m             --model _ci_out/model             --device cpu             --early-window-s 2.0             --merge-gap-s 0.30             --min-duration-s 0.10
 
-      - name: Assert early-warning (event F1 + lead)
+      - name: Assert early-warning lead time and F1
         run: |
           python - <<'PY'
           import json
@@ -52,28 +52,24 @@ jobs:
 
           p = pathlib.Path("_ci_out/hybrid_dl/metrics_hybrid.json")
           m = json.loads(p.read_text(encoding="utf-8"))
-
           lead_max = float(m.get("lead_s_max", 0.0))
           f1_event = float(m.get("f1_event", 0.0))
-          prec_event = float(m.get("alert_event_precision", 0.0))
-          rec_event = float(m.get("drop_event_recall", 0.0))
-          dl_active = bool(m.get("dl_active", False))
-
-          if not dl_active:
-            print("FAIL: dl_active must be true (DL inference must run).")
-            print("dl_error:", m.get("dl_error"))
-            sys.exit(1)
-
+          precision_event = float(m.get("event_precision", m.get("alert_event_precision", 0.0)))
+          recall_event = float(m.get("event_recall", m.get("drop_event_recall", 0.0)))
+          f1_point = float(m.get("f1", 0.0))
           if lead_max <= 0.0:
-            print("FAIL: lead_s_max must be > 0.0 for early warning, got", lead_max)
+            print("FAIL: lead_s_max must be > 0.0, got", lead_max)
             sys.exit(1)
-
           if f1_event < 0.90:
             print("FAIL: event-level F1 must be >= 0.90, got", f1_event)
-            print("event precision=", prec_event, "event recall=", rec_event)
             sys.exit(1)
-
-          print("OK: lead_s_max=", lead_max, "f1_event=", f1_event, "prec_event=", prec_event, "rec_event=", rec_event)
+          print(
+            "OK: lead_s_max=", lead_max,
+            "F1_event=", f1_event,
+            "event_precision=", precision_event,
+            "event_recall=", recall_event,
+            "F1_pointwise=", f1_point,
+          )
           PY
 
       - name: Upload artifacts

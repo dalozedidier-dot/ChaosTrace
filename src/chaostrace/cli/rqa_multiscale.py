@@ -33,10 +33,6 @@ from chaostrace.rqa.multivariate import CrossRQAConfig, compute_cross_rqa
 
 
 def _parse_scales(s: str) -> List[float]:
-    s = str(s).strip().lower()
-    if s == "auto":
-        return []
-
     out: List[float] = []
     for part in s.split(","):
         part = part.strip()
@@ -46,40 +42,6 @@ def _parse_scales(s: str) -> List[float]:
     if not out:
         raise ValueError("Empty --scales")
     return out
-
-
-def _auto_scales_s(
-    *,
-    hz: float,
-    n_points: int,
-    emb_dim: int,
-    emb_lag: int,
-) -> List[float]:
-    """Pick defensible scales in seconds.
-
-    Many telemetry files are low frequency (ex: 4 Hz). Very short windows like
-    3 s would then contain ~12 points and make any embedding-based RQA unstable
-    (or degenerate to zeros). We compute a minimum window length based on the
-    embedding and return a small geometric set of scales.
-    """
-
-    hz = float(max(hz, 1e-6))
-
-    # Heuristic: need enough points for embedding and for recurrence structure.
-    min_points = max(80, 4 * (int(emb_dim) - 1) * int(emb_lag) + 20)
-    base_s = int(np.ceil(min_points / hz))
-    base_s = max(base_s, 10)
-
-    total_s = int(np.floor(n_points / hz))
-    scales: List[int] = []
-    for k in (1, 2, 4, 8):
-        s = base_s * k
-        if s < total_s:
-            scales.append(s)
-
-    scales = sorted(set(scales))
-    # Keep at most 4 scales to control runtime.
-    return [float(s) for s in scales[:4]]
 
 
 def _iqr(x: np.ndarray) -> float:
@@ -155,14 +117,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="ChaosTrace: multiscale RQA (windowed) with early warning score.")
     p.add_argument("--input", required=True, help="CSV input with time_s and series columns.")
     p.add_argument("--out", required=True, help="Output directory.")
-    p.add_argument(
-        "--scales",
-        default="auto",
-        help=(
-            "Comma-separated window scales in seconds, or 'auto'. "
-            "Auto picks defensible windows based on sample rate and embedding."
-        ),
-    )
+    p.add_argument("--scales", default="3,5,10,20", help="Comma-separated window scales in seconds.")
     p.add_argument("--series", default="foil_height_m", help="Primary series for RQA.")
     p.add_argument("--drop-threshold", type=float, default=0.30, help="Threshold defining drop regime (for summary stats).")
     p.add_argument("--emb-dim", type=int, default=5)
@@ -170,10 +125,62 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--rr-target", type=float, default=0.02, help="Target recurrence rate for fixed-RR epsilon.")
     p.add_argument("--theiler-window", type=int, default=-1, help="Theiler window. -1 uses emb_lag + 1.")
     p.add_argument("--max-points", type=int, default=500, help="Max points per window for distance computation.")
+    p.add_argument(
+        "--enable-network",
+        action="store_true",
+        help="Compute recurrence-network metrics (slower). Disabled by default for CI speed.",
+    )
+    p.add_argument(
+        "--stride-s",
+        type=float,
+        default=0.5,
+        help="Stride between sliding windows in seconds (default 0.5s). Larger values speed up runs.",
+    )
+    p.add_argument(
+        "--max-windows",
+        type=int,
+        default=0,
+        help="Optional cap on number of windows per scale (0 = no cap). Useful for CI speed.",
+    )
     p.add_argument("--cross", action="store_true", help="Enable Cross-RQA between series and --cross-series.")
     p.add_argument("--cross-series", default="boat_speed", help="Secondary series for cross-RQA.")
     p.add_argument("--early-window-s", type=float, default=2.0, help="Lead time window to count early warnings before drop onsets.")
     p.add_argument("--baseline-windows", type=int, default=0, help="Baseline window count. 0 picks an automatic value per scale.")
+
+    # Early-warning threshold calibration on the baseline segment (smallest scale).
+    # This is intentionally baseline-driven (percentile or mean+K*std) and must NOT
+    # impose a hard-coded floor like 0.60 (which can make early warnings impossible
+    # when early_score lives in ~[0.0, 0.4]).
+    p.add_argument(
+        "--baseline-s",
+        type=float,
+        default=60.0,
+        help="Baseline duration in seconds (starting at t0). Used to calibrate early_threshold on the smallest scale. Set <=0 to disable time-based baseline and use baseline-windows.",
+    )
+    p.add_argument(
+        "--early-threshold-mode",
+        choices=["pctl", "mean3s"],
+        default="pctl",
+        help="How to compute early_threshold from the baseline early_score: 'pctl' uses a high percentile; 'mean3s' uses mean + K*std.",
+    )
+    p.add_argument(
+        "--early-threshold-quantile",
+        type=float,
+        default=0.995,
+        help="Quantile for early_threshold when mode='pctl' (e.g. 0.99 to 0.995).",
+    )
+    p.add_argument(
+        "--early-threshold-k",
+        type=float,
+        default=3.0,
+        help="K for early_threshold when mode='mean3s' (threshold = mean + K*std).",
+    )
+    p.add_argument(
+        "--early-threshold-floor",
+        type=float,
+        default=0.0,
+        help="Optional lower bound on early_threshold (default 0.0).",
+    )
     return p
 
 
@@ -193,13 +200,6 @@ def main(argv: List[str] | None = None) -> int:
         hz = 10.0
 
     scales = _parse_scales(str(args.scales))
-    if not scales:
-        scales = _auto_scales_s(
-            hz=float(hz),
-            n_points=int(len(df)),
-            emb_dim=int(args.emb_dim),
-            emb_lag=int(args.emb_lag),
-        )
 
     adv_cfg = RQAAdvancedConfig(
         emb_dim=int(args.emb_dim),
@@ -207,7 +207,7 @@ def main(argv: List[str] | None = None) -> int:
         rr_target=float(args.rr_target),
         theiler_window=None if int(args.theiler_window) < 0 else int(args.theiler_window),
         max_points=int(args.max_points),
-        enable_network=True,
+        enable_network=bool(args.enable_network),
     )
 
     cross_cfg = CrossRQAConfig(
@@ -220,22 +220,10 @@ def main(argv: List[str] | None = None) -> int:
 
     all_rows: List[Dict[str, Any]] = []
     per_scale_out: Dict[str, str] = {}
-    skipped_scales: List[Dict[str, Any]] = []
-
-    min_points = max(80, 4 * (int(args.emb_dim) - 1) * int(args.emb_lag) + 20)
 
     for s in scales:
         window_n = int(max(10, round(float(s) * float(hz))))
-        if window_n < int(min_points):
-            skipped_scales.append(
-                {
-                    "scale_s": float(s),
-                    "window_n": int(window_n),
-                    "min_points": int(min_points),
-                }
-            )
-            continue
-        stride_n = max(1, int(round(0.20 * float(hz))))
+        stride_n = max(1, int(round(float(args.stride_s) * float(hz))))
         rows: List[Dict[str, Any]] = []
 
         x_full = df[str(args.series)].to_numpy(dtype=float)
@@ -257,6 +245,9 @@ def main(argv: List[str] | None = None) -> int:
                 m.update(cm)
 
             rows.append(m)
+
+            if int(args.max_windows) > 0 and len(rows) >= int(args.max_windows):
+                break
 
         # Baseline segment and baseline-relative early score
         det_arr = np.asarray([float(r.get("det", 0.0)) for r in rows], dtype=float)
@@ -336,21 +327,12 @@ def main(argv: List[str] | None = None) -> int:
         fig.savefig(str(plot_path), dpi=180)
         plt.close(fig)
 
-    if not all_rows:
-        raise RuntimeError(
-            "No RQA windows computed. All requested scales were too small for the embedding; "
-            "use larger --scales or --scales auto."
-        )
-
     # Summary with a simple lead-time estimate on the smallest scale
     df_all = pd.DataFrame(all_rows)
     summary: Dict[str, Any] = {
         "input": str(args.input),
         "out": str(args.out),
-        "sample_hz": float(hz),
         "scales_s": scales,
-        "min_points": int(min_points),
-        "skipped_scales": skipped_scales,
         "series": str(args.series),
         "drop_threshold": float(args.drop_threshold),
         "cross_enabled": bool(args.cross),
@@ -366,27 +348,93 @@ def main(argv: List[str] | None = None) -> int:
         summary["early_score_mean"] = float(np.nanmean(df_all["early_score"].to_numpy(dtype=float)))
         summary["early_score_p95"] = float(np.nanpercentile(df_all["early_score"].to_numpy(dtype=float), 95))
 
-    # Lead estimate on the smallest scale, using early_score threshold
+    # Lead estimate per scale (baseline-calibrated threshold), and "best" scale selection
     try:
-        sc0 = float(min(scales))
-        df_sc = df_all[df_all["scale_s"] == sc0].sort_values("t_mid_s")
-        if not df_sc.empty:
-            drop_on = _drop_onsets(time_s, df[str(args.series)].to_numpy(dtype=float), thr=float(args.drop_threshold))
-            baseN = int(min(max(6, len(df_sc) // 5), 25))
-            base_es = df_sc["early_score"].to_numpy(dtype=float)[:baseN]
-            thr_es = float(max(0.60, np.nanpercentile(base_es, 99.5)))
+        drop_on = _drop_onsets(time_s, df[str(args.series)].to_numpy(dtype=float), thr=float(args.drop_threshold))
+        summary["drop_onsets_count"] = int(len(drop_on))
+
+        ew_by_scale: Dict[str, Any] = {}
+        best = {
+            "scale_s": None,
+            "matched": -1,
+            "lead_max": -1.0,
+            "lead_median": 0.0,
+            "threshold": None,
+        }
+
+        for sc in sorted(df_all["scale_s"].unique().tolist()):
+            sc = float(sc)
+            df_sc = df_all[df_all["scale_s"] == sc].sort_values("t_mid_s")
+            if df_sc.empty:
+                continue
+
+            # Baseline selection
+            t_mid = df_sc["t_mid_s"].to_numpy(dtype=float)
+            es_all = df_sc["early_score"].to_numpy(dtype=float)
+            t0 = float(np.nanmin(t_mid)) if t_mid.size else 0.0
+
+            base_mask = None
+            if float(args.baseline_s) > 0:
+                base_mask = t_mid <= (t0 + float(args.baseline_s))
+            if base_mask is None or not bool(np.any(base_mask)):
+                # Fallback: baseline by window count
+                baseN = int(min(max(6, len(df_sc) // 5), 25))
+                base_mask = np.zeros_like(t_mid, dtype=bool)
+                base_mask[:baseN] = True
+
+            base_es = es_all[base_mask]
+            base_es = base_es[np.isfinite(base_es)]
+            if base_es.size < 5:
+                # Final fallback: use all windows if baseline is too small
+                base_es = es_all[np.isfinite(es_all)]
+
+            # Threshold calibration
+            mode = str(args.early_threshold_mode)
+            if mode == "mean3s":
+                mu = float(np.nanmean(base_es))
+                sd = float(np.nanstd(base_es))
+                thr_es = mu + float(args.early_threshold_k) * sd
+            else:
+                q = float(args.early_threshold_quantile)
+                q = min(max(q, 0.0), 1.0)
+                thr_es = float(np.nanpercentile(base_es, 100.0 * q))
+
+            thr_es = float(max(float(args.early_threshold_floor), thr_es))
             matched, leads = _estimate_leads(
-                df_sc["t_mid_s"].to_numpy(dtype=float),
-                df_sc["early_score"].to_numpy(dtype=float),
+                t_mid,
+                es_all,
                 drop_on,
                 early_window_s=float(args.early_window_s),
                 early_threshold=float(thr_es),
             )
-            summary["early_threshold_used"] = float(thr_es)
-            summary["drop_onsets_count"] = int(len(drop_on))
-            summary["matched_drop_onsets"] = int(matched)
-            summary["lead_median_s"] = float(np.median(leads)) if leads else 0.0
-            summary["lead_max_s"] = float(np.max(leads)) if leads else 0.0
+            lead_median = float(np.median(leads)) if leads else 0.0
+            lead_max = float(np.max(leads)) if leads else 0.0
+
+            ew_by_scale[f"{sc:g}"] = {
+                "early_threshold_used": float(thr_es),
+                "matched_drop_onsets": int(matched),
+                "lead_median_s": lead_median,
+                "lead_max_s": lead_max,
+            }
+
+            # Best scale: maximize matched, then lead_max
+            if int(matched) > int(best["matched"]) or (
+                int(matched) == int(best["matched"]) and lead_max > float(best["lead_max"])
+            ):
+                best.update({"scale_s": sc, "matched": int(matched), "lead_max": lead_max, "lead_median": lead_median, "threshold": thr_es})
+
+        summary["early_threshold_mode"] = str(args.early_threshold_mode)
+        summary["early_threshold_quantile"] = float(args.early_threshold_quantile)
+        summary["early_threshold_k"] = float(args.early_threshold_k)
+        summary["baseline_s"] = float(args.baseline_s)
+        summary["early_warning_by_scale"] = ew_by_scale
+
+        if best["scale_s"] is not None:
+            summary["best_scale_s"] = float(best["scale_s"])
+            summary["early_threshold_used"] = float(best["threshold"])
+            summary["matched_drop_onsets"] = int(best["matched"])
+            summary["lead_median_s"] = float(best["lead_median"])
+            summary["lead_max_s"] = float(best["lead_max"])
     except Exception:
         pass
 

@@ -8,28 +8,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout (standard)
-        id: checkout
-        uses: actions/checkout@v4
-        continue-on-error: true
-        with:
-          fetch-depth: 1
-
-      - name: Checkout fallback (GitHub archive)
-        if: steps.checkout.outcome == 'failure'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          rm -rf .git || true
-          curl -L \
-            -H "Authorization: Bearer ${GH_TOKEN}" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            "https://api.github.com/repos/${GITHUB_REPOSITORY}/tarball/${GITHUB_SHA}" \
-            -o repo.tgz
-          tar -xzf repo.tgz --strip-components=1
-          rm -f repo.tgz
-          test -f pyproject.toml
+      - uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -49,10 +28,24 @@ jobs:
           python -m chaostrace.cli.rqa_multiscale \
             --input test_data/sample_timeseries_1_2_drops.csv \
             --out _ci_out/rqa_multiscale \
-            --scales auto \
+            --scales 3,5,10,20 \
             --series foil_height_m \
             --cross \
-            --drop-threshold 0.30
+            --drop-threshold 0.30 \
+            --early-window-s 2.0 \
+            --baseline-s 60 \
+            --early-threshold-mode pctl \
+            --early-threshold-quantile 0.995 \
+            --early-threshold-floor 0.0 \
+            --stride-s 0.5 \
+            --max-windows 1500
+
+      - name: Show summary (threshold + lead)
+        if: always()
+        run: |
+          set -euo pipefail
+          echo "---- rqa_multiscale_summary.json ----"
+          cat _ci_out/rqa_multiscale/rqa_multiscale_summary.json || true
 
       - name: Upload artifacts
         if: always()
