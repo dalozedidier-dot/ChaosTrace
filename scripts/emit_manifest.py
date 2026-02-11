@@ -35,10 +35,7 @@ def _github_ctx() -> dict[str, str]:
         v = os.environ.get(k)
         if v is not None:
             out[k.lower()] = v
-    fixed: dict[str, str] = {}
-    for k, v in out.items():
-        fixed[k] = v
-    return fixed
+    return out
 
 
 def _parse_params(items: list[str]) -> dict[str, Any]:
@@ -52,10 +49,10 @@ def _parse_params(items: list[str]) -> dict[str, Any]:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Emit a stable CI manifest (sha256, sizes, context).")
-    ap.add_argument("--out-dir", required=True, help="Directory to write manifest_ci.json into")
-    ap.add_argument("--files", nargs="+", default=[], help="Files relative to out-dir (or absolute)")
-    ap.add_argument("--param", action="append", default=[], help="Extra key=value params")
+    ap = argparse.ArgumentParser(description="Emit a stable CI manifest with sha256 and context.")
+    ap.add_argument("--out-dir", required=True)
+    ap.add_argument("--files", nargs="+", default=[])
+    ap.add_argument("--param", action="append", default=[])
     args = ap.parse_args()
 
     out_dir = Path(args.out_dir)
@@ -84,10 +81,9 @@ def main() -> int:
         "files": files,
     }
 
-    (out_dir / "manifest_ci.json").write_text(
-        json.dumps(payload, indent=2, sort_keys=True),
-        encoding="utf-8",
-    )
+    out_path = out_dir / "manifest_ci.json"
+    out_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    print(f"WROTE {out_path}")
     return 0
 
 
