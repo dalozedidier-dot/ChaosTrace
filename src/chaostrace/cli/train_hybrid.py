@@ -6,7 +6,6 @@ from pathlib import Path
 from chaostrace.analyzers.markov_drop import markov_drop
 from chaostrace.data.ingest import load_timeseries
 from chaostrace.features.windowing import estimate_sample_hz
-from chaostrace.utils.manifest import write_manifest
 
 
 def main() -> None:
@@ -34,7 +33,7 @@ def main() -> None:
     ap.add_argument("--lr", type=float, default=3e-4, help="Learning rate")
     ap.add_argument("--pos-weight", type=float, default=3.0, help="Positive class weight for BCE")
     ap.add_argument("--device", default="cpu", help="cpu or cuda")
-    ap.add_argument("--seed", type=int, default=7, help="Random seed (NumPy + Torch)")
+    ap.add_argument("--seed", type=int, default=7, help="RNG seed (torch/numpy/python)")
 
     args = ap.parse_args()
 
@@ -75,28 +74,6 @@ def main() -> None:
         device=str(args.device),
         seed=int(args.seed),
     )
-
-    # Stable manifest for comparability
-    write_manifest(
-        out_dir,
-        params={
-            "tool": "train_hybrid",
-            "input": str(args.input),
-            "cols": cols,
-            "window_s": float(args.window_s),
-            "stride_s": float(args.stride_s),
-            "horizon_s": float(args.horizon_s),
-            "contrastive_epochs": int(args.contrastive_epochs),
-            "supervised_epochs": int(args.supervised_epochs),
-            "batch_size": int(args.batch_size),
-            "lr": float(args.lr),
-            "pos_weight": float(args.pos_weight),
-            "device": str(args.device),
-            "seed": int(args.seed),
-        },
-        files=["model.pt", "config.json"],
-    )
-
     print(str(model_path))
 
 

@@ -26,31 +26,44 @@ jobs:
 
       - name: Install
         run: |
+          set -euo pipefail
           python -m pip install -U pip
           pip install -e ".[dev,mp]"
 
       - name: Run hybrid (Matrix Profile)
         run: |
+          set -euo pipefail
           mkdir -p _ci_out/hybrid_mp
-          python -m chaostrace.cli.run_hybrid                 --input test_data/sample_timeseries_1_2_drops.csv                 --out _ci_out/hybrid_mp                 --runs "${{ inputs.runs }}"                 --seed "${{ inputs.seed }}"                 --enable-mp                 --require-mp                 --mp-col boat_speed                 --pick max_f1_event
-
-      - name: Emit manifest (hybrid_mp)
-        if: always()
-        run: |
-          python scripts/emit_manifest.py                 --out-dir _ci_out/hybrid_mp                 --files anomalies_hybrid.csv metrics_hybrid.json grid_metrics.json explain_hybrid.jsonl                 --param tool=run_hybrid                 --param kind=hybrid_mp
+          python -m chaostrace.cli.run_hybrid \
+            --input test_data/sample_timeseries_1_2_drops.csv \
+            --out _ci_out/hybrid_mp \
+            --runs "${{ inputs.runs }}" \
+            --seed "${{ inputs.seed }}" \
+            --enable-mp \
+            --require-mp \
+            --mp-col boat_speed \
+            --pick max_f1_event
 
       - name: Assert MP active
         run: |
           python - <<'PY'
-          import json
-          import pathlib
-          import sys
+          import json, pathlib, sys
           m = json.loads(pathlib.Path("_ci_out/hybrid_mp/metrics_hybrid.json").read_text(encoding="utf-8"))
           if not bool(m.get("mp_active", False)):
             print("FAIL: mp_active must be true. mp_error:", m.get("mp_error"))
             sys.exit(1)
           print("OK: mp_active=true")
           PY
+
+      - name: Emit manifest (hybrid_mp)
+        if: always()
+        run: |
+          set -euo pipefail
+          python scripts/emit_manifest.py \
+            --out-dir _ci_out/hybrid_mp \
+            --files anomalies_hybrid.csv metrics_hybrid.json grid_metrics.json explain_hybrid.jsonl \
+            --param kind=hybrid_mp \
+            --param tool=run_hybrid
 
       - name: Upload artifacts
         if: always()

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import random
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -25,39 +24,6 @@ def _torch() -> Any:
         ) from e
 
 
-
-
-def _set_determinism(seed: int, *, device: str) -> None:
-    """Best-effort determinism for CI runs (CPU by default)."""
-    torch = _torch()
-
-    s = int(seed)
-    random.seed(s)
-    np.random.seed(s)
-    torch.manual_seed(s)
-    if device.startswith("cuda") and torch.cuda.is_available():  # pragma: no cover
-        torch.cuda.manual_seed_all(s)
-
-    # Threading can introduce tiny nondeterminism; prefer stable single-thread in CI.
-    try:
-        if device == "cpu":
-            torch.set_num_threads(1)
-            torch.set_num_interop_threads(1)
-    except Exception:
-        pass
-
-    # Deterministic algorithms (best-effort).
-    try:
-        torch.use_deterministic_algorithms(True)
-    except Exception:
-        pass
-
-    # cuDNN knobs (only relevant on CUDA).
-    try:  # pragma: no cover
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
-    except Exception:
-        pass
 def _augment(x: "Any") -> "Any":
     """Simple augmentations for contrastive pretraining."""
     torch = _torch()
@@ -92,6 +58,40 @@ def _nt_xent(z1: "Any", z2: "Any", *, temperature: float = 0.2) -> "Any":
     return loss
 
 
+
+def _set_determinism(seed: int, device: str) -> None:
+    """Best-effort determinism for CI runs.
+
+    The goal is to make model init + augmentations reproducible on CPU.
+    """
+    import random
+
+    torch = _torch()
+
+    seed = int(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if hasattr(torch, "cuda") and torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+    # Stabilize CPU threading (best effort).
+    try:
+        torch.set_num_threads(1)
+        torch.set_num_interop_threads(1)
+    except Exception:
+        pass
+
+    # Determinism flags (best effort).
+    try:
+        torch.use_deterministic_algorithms(True, warn_only=True)
+    except Exception:
+        pass
+
+    if hasattr(torch, "backends") and hasattr(torch.backends, "cudnn"):
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+
 def train_hybrid_model(
     df: pd.DataFrame,
     *,
@@ -114,7 +114,7 @@ def train_hybrid_model(
     The model is saved to <out_dir>/model.pt and config to <out_dir>/config.json.
     """
     torch = _torch()
-    _set_determinism(int(seed), device=str(device))
+    _set_determinism(int(seed), str(device))
     out_dir.mkdir(parents=True, exist_ok=True)
 
     ds = make_windows(
