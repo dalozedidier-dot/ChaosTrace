@@ -130,6 +130,11 @@ jobs:
             --seed 7 \
             --pick max_f1_event
 
+- name: Emit manifest (hybrid_core)
+  if: always()
+  run: |
+    python scripts/emit_manifest.py             --out-dir _ci_out/hybrid_core             --files anomalies_hybrid.csv metrics_hybrid.json grid_metrics.json explain_hybrid.jsonl             --param tool=run_hybrid             --param kind=hybrid_core
+
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4

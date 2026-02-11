@@ -20,6 +20,11 @@ jobs:
   run:
     runs-on: ubuntu-latest
 
+    env:
+      PYTHONHASHSEED: "0"
+      OMP_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+
     steps:
       - uses: actions/checkout@v4
 
@@ -36,17 +41,22 @@ jobs:
       - name: Generate early-warning dataset (with precursors)
         run: |
           mkdir -p _ci_out/datasets
-          python scripts/generate_sailgp_synth.py             --profile drops             --seed "${{ inputs.seed }}"             --pre-drop-s 2.0             --pre-drop-depth 0.12             --out _ci_out/datasets/sample_timeseries_earlywarning.csv
+          python scripts/generate_sailgp_synth.py                 --profile drops                 --seed "${{ inputs.seed }}"                 --pre-drop-s 2.0                 --pre-drop-depth 0.12                 --out _ci_out/datasets/sample_timeseries_earlywarning.csv
 
-      - name: Train lightweight DL model (true early warning, onset-labelled)
+      - name: Train lightweight DL model (deterministic CI seed)
         run: |
           mkdir -p _ci_out/model
-          python -m chaostrace.cli.train_hybrid             --input _ci_out/datasets/sample_timeseries_earlywarning.csv             --out _ci_out/model             --cols boat_speed,foil_height_m             --window-s 5.0             --stride-s 0.2             --horizon-s 1.5             --contrastive-epochs "${{ inputs.contrastive_epochs }}"             --supervised-epochs "${{ inputs.supervised_epochs }}"             --batch-size 64             --pos-weight 6.0             --device cpu
+          python -m chaostrace.cli.train_hybrid                 --input _ci_out/datasets/sample_timeseries_earlywarning.csv                 --out _ci_out/model                 --cols boat_speed,foil_height_m                 --window-s 5.0                 --stride-s 0.2                 --horizon-s 1.5                 --contrastive-epochs "${{ inputs.contrastive_epochs }}"                 --supervised-epochs "${{ inputs.supervised_epochs }}"                 --batch-size 64                 --pos-weight 6.0                 --device cpu                 --seed "${{ inputs.seed }}"
 
-      - name: Run hybrid (chaos + DL) and pick best by F1
+      - name: Run hybrid (chaos + DL) with stricter gating (less pointwise tail)
         run: |
           mkdir -p _ci_out/hybrid_dl
-          python -m chaostrace.cli.run_hybrid             --input _ci_out/datasets/sample_timeseries_earlywarning.csv             --out _ci_out/hybrid_dl             --runs 40             --seed "${{ inputs.seed }}"             --enable-causal             --causal-cols boat_speed,foil_height_m             --model _ci_out/model             --device cpu             --pick max_f1_event             --early-window-s 2.0             --baseline-s 10.0             --baseline-percentile 99.5             --threshold-min 0.40             --threshold-max 0.97             --merge-gap-s 0.30             --min-duration-s 0.10
+          python -m chaostrace.cli.run_hybrid                 --input _ci_out/datasets/sample_timeseries_earlywarning.csv                 --out _ci_out/hybrid_dl                 --runs 40                 --seed "${{ inputs.seed }}"                 --enable-causal                 --causal-cols boat_speed,foil_height_m                 --model _ci_out/model                 --device cpu                 --pick max_ew                 --early-window-s 2.0                 --baseline-s 10.0                 --baseline-percentile 99.5                 --threshold-min 0.40                 --threshold-max 0.97                 --gate-dl 0.05                 --merge-gap-s 0.20                 --min-duration-s 0.20
+
+      - name: Emit manifest (hybrid_dl)
+        if: always()
+        run: |
+          python scripts/emit_manifest.py                 --out-dir _ci_out/hybrid_dl                 --files anomalies_hybrid.csv metrics_hybrid.json grid_metrics.json explain_hybrid.jsonl                 --param tool=run_hybrid                 --param kind=hybrid_dl
 
       - name: Assert early-warning event F1 and lead
         run: |

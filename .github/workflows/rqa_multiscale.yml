@@ -22,35 +22,16 @@ jobs:
           python -m pip install -U pip
           pip install -e ".[dev]"
 
-      - name: Generate early-warning dataset (with precursors)
-        run: |
-          set -euo pipefail
-          mkdir -p _ci_out/datasets
-          python scripts/generate_sailgp_synth.py \
-            --profile drops \
-            --seed 7 \
-            --pre-drop-s 2.0 \
-            --pre-drop-depth 0.12 \
-            --out _ci_out/datasets/sample_timeseries_earlywarning.csv
-
       - name: Multiscale RQA
         run: |
           set -euo pipefail
           mkdir -p _ci_out/rqa_multiscale
-          python -m chaostrace.cli.rqa_multiscale \
-            --input _ci_out/datasets/sample_timeseries_earlywarning.csv \
-            --out _ci_out/rqa_multiscale \
-            --scales 3,5,10,20 \
-            --series foil_height_m \
-            --cross \
-            --drop-threshold 0.30 \
-            --early-window-s 2.0 \
-            --baseline-s 60 \
-            --early-threshold-mode pctl \
-            --early-threshold-quantile 0.995 \
-            --early-threshold-floor 0.05 \
-            --stride-s 0.5 \
-            --max-windows 1500
+          python -m chaostrace.cli.rqa_multiscale                 --input test_data/sample_timeseries_1_2_drops.csv                 --out _ci_out/rqa_multiscale                 --scales 3,5,10,20                 --series foil_height_m                 --cross                 --drop-threshold 0.30                 --early-window-s 2.0                 --baseline-s 60                 --early-threshold-mode pctl                 --early-threshold-quantile 0.995                 --early-threshold-floor 0.05                 --stride-s 0.5                 --max-windows 1500
+
+      - name: Emit manifest (rqa_multiscale)
+        if: always()
+        run: |
+          python scripts/emit_manifest.py                 --out-dir _ci_out/rqa_multiscale                 --files rqa_multiscale_summary.json multiscale_det_lam.png multiscale_det_lam.html multiscale_rqa_scale_3s.csv multiscale_rqa_scale_5s.csv multiscale_rqa_scale_10s.csv multiscale_rqa_scale_20s.csv                 --param tool=rqa_multiscale                 --param kind=rqa_multiscale
 
       - name: Show summary (threshold + lead)
         if: always()
