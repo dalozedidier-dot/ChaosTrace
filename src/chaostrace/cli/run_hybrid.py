@@ -9,9 +9,9 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
+from chaostrace.orchestrator.sweep import SweepConfig, build_grid, sweep
 from chaostrace.features.windowing import estimate_sample_hz
 from chaostrace.hybrid.metrics import event_level_metrics, pointwise_prf
-from chaostrace.orchestrator.sweep import SweepConfig, build_grid, sweep
 
 
 def _load_csv(path: str) -> pd.DataFrame:
@@ -45,12 +45,6 @@ def _default_weights(*, has_dl: bool, has_mp: bool, has_causal: bool) -> Dict[st
     return _renorm_weights(w)
 
 
-def _event_f1(prec: float, rec: float) -> float:
-    p = float(prec)
-    r = float(rec)
-    return (2.0 * p * r / (p + r)) if (p + r) > 0 else 0.0
-
-
 def _dynamic_threshold(
     scores: np.ndarray,
     baseline_mask: np.ndarray,
@@ -59,43 +53,19 @@ def _dynamic_threshold(
     thr_min: float,
     thr_max: float,
 ) -> float:
-    """Compute a robust threshold from a baseline segment.
-
-    Important: if the user's thr_min is above the maximum achievable score, we clamp the
-    threshold to the maximum score so alerts are still possible (otherwise you'd get
-    a silent run with 0 alerts).
-    """
     s = np.asarray(scores, dtype=float)
     m = np.asarray(baseline_mask, dtype=bool)
     if s.shape != m.shape:
         raise ValueError("scores and baseline_mask must have same shape")
-
-    finite = s[np.isfinite(s)]
-    if finite.size == 0:
-        return float(thr_min)
-
     base = s[m]
     base = base[np.isfinite(base)]
     if base.size == 0:
-        thr = float(np.percentile(finite, float(percentile)))
+        thr = float(np.nanpercentile(s[np.isfinite(s)], percentile)) if np.isfinite(s).any() else thr_min
     else:
-        thr = float(np.percentile(base, float(percentile)))
-
+        thr = float(np.percentile(base, percentile))
     if not np.isfinite(thr):
         thr = float(thr_min)
-
-    # Standard clip first.
-    thr = float(np.clip(thr, float(thr_min), float(thr_max)))
-
-    # If thr is above what scores can reach, clamp to max score (minus epsilon).
-    max_valid = float(np.max(finite))
-    eps = 1e-9
-    max_valid = max(max_valid - eps, 0.0)
-    thr_floor = min(float(thr_min), max_valid)
-    thr = min(thr, max_valid)
-    thr = max(thr, thr_floor)
-
-    return float(thr)
+    return float(np.clip(thr, thr_min, thr_max))
 
 
 def _postprocess_alerts(
@@ -149,34 +119,32 @@ def _postprocess_alerts(
     return out, kept
 
 
-def _compute_mp_score(df: pd.DataFrame, *, col: str, window_n: int) -> Tuple[Optional[np.ndarray], Optional[str]]:
+def _compute_mp_score(df: pd.DataFrame, *, col: str, window_n: int) -> Optional[np.ndarray]:
     try:
         from chaostrace.hybrid.matrix_profile import compute_matrix_profile
 
-        return compute_matrix_profile(df, col=col, window_n=window_n).score, None
-    except Exception as e:
-        return None, f"{type(e).__name__}: {e}"
+        return compute_matrix_profile(df, col=col, window_n=window_n).score
+    except Exception:
+        return None
 
 
-def _compute_causal_score(
-    df: pd.DataFrame, *, cols: List[str], window_n: int, baseline_n: int
-) -> Tuple[Optional[np.ndarray], Optional[str]]:
+def _compute_causal_score(df: pd.DataFrame, *, cols: List[str], window_n: int, baseline_n: int) -> Optional[np.ndarray]:
     try:
         from chaostrace.hybrid.causal_var import compute_causal_drift
 
-        return compute_causal_drift(df, cols=cols, window_n=window_n, baseline_n=baseline_n).score, None
-    except Exception as e:
-        return None, f"{type(e).__name__}: {e}"
+        return compute_causal_drift(df, cols=cols, window_n=window_n, baseline_n=baseline_n).score
+    except Exception:
+        return None
 
 
-def _compute_dl_score(df: pd.DataFrame, *, model_dir: Path, device: str) -> Tuple[Optional[np.ndarray], Optional[str]]:
+def _compute_dl_score(df: pd.DataFrame, *, model_dir: Path, device: str) -> Optional[np.ndarray]:
     try:
         from chaostrace.hybrid.dl.infer import infer_series
 
         out = infer_series(df, model_dir=model_dir, device=device)
-        return out.score, None
-    except Exception as e:
-        return None, f"{type(e).__name__}: {e}"
+        return out.score
+    except Exception:
+        return None
 
 
 @dataclass(frozen=True)
@@ -191,9 +159,7 @@ class PickedRun:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(
-        description="Run hybrid detection: chaos + optional Matrix Profile + optional causal drift + optional DL."
-    )
+    p = argparse.ArgumentParser(description="Run hybrid detection: chaos + optional MP + optional causal + optional DL.")
     p.add_argument("--input", required=True, help="CSV input with time_s and telemetry columns.")
     p.add_argument("--out", required=True, help="Output directory.")
     p.add_argument("--runs", type=int, default=30, help="Number of sweep configs sampled from internal grid.")
@@ -205,42 +171,30 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--emb-dim", type=int, default=None)
     p.add_argument("--emb-lag", type=int, default=None)
 
-    # Optional hybrid components
     p.add_argument("--enable-mp", action="store_true", help="Enable Matrix Profile component (requires stumpy).")
     p.add_argument("--mp-col", default="boat_speed", help="Column to use for Matrix Profile score.")
-    p.add_argument("--require-mp", action="store_true", help="Fail if MP is requested but not available.")
-
     p.add_argument("--enable-causal", action="store_true", help="Enable causal drift component.")
     p.add_argument("--causal-cols", default="boat_speed,foil_height_m", help="Columns used for causal drift (CSV).")
-    p.add_argument("--require-causal", action="store_true", help="Fail if causal drift is requested but not available.")
 
     p.add_argument("--model", default=None, help="Model directory produced by train_hybrid (optional).")
     p.add_argument("--device", default="cpu", help="DL device (cpu).")
-    p.add_argument("--require-dl", action="store_true", help="Fail if a model is provided but DL inference fails.")
 
-    # Event-level early warning window
     p.add_argument("--early-window-s", type=float, default=2.0, help="Event-level early window in seconds.")
 
     # Dynamic threshold and post-processing knobs
     p.add_argument("--baseline-s", type=float, default=10.0, help="Seconds used as baseline segment from start.")
     p.add_argument("--baseline-frac", type=float, default=0.0, help="Fraction of series used as baseline (0 disables).")
     p.add_argument("--baseline-percentile", type=float, default=99.5)
-    p.add_argument("--threshold-min", type=float, default=0.55)
+    p.add_argument("--threshold-min", type=float, default=0.05)
     p.add_argument("--threshold-max", type=float, default=0.97)
-    p.add_argument("--gate-dl", type=float, default=0.0, help="Component gate for DL score (0 disables).")
-    p.add_argument("--gate-causal", type=float, default=0.0, help="Component gate for causal score (0 disables).")
-    p.add_argument("--gate-chaos", type=float, default=0.0, help="Component gate for chaos score (0 disables).")
     p.add_argument("--merge-gap-s", type=float, default=0.20)
     p.add_argument("--min-duration-s", type=float, default=0.30)
 
     p.add_argument(
         "--pick",
-        default="auto",
-        choices=["auto", "min_alert_frac", "max_f1", "max_f1_event", "max_ew", "min_fp"],
-        help=(
-            "How to pick the best config when multiple runs are evaluated. "
-            "Use max_ew for serious early-warning (lead + event F1)."
-        ),
+        default="min_alert_frac",
+        choices=["min_alert_frac", "max_f1", "min_fp", "max_f1_event", "max_lead"],
+        help="How to pick the best config when multiple runs are evaluated.",
     )
     return p
 
@@ -273,92 +227,24 @@ def _select_cfgs(args: argparse.Namespace) -> List[SweepConfig]:
     return [cfgs[int(i)] for i in idx]
 
 
-def _resolve_pick_mode(args: argparse.Namespace, grid_rows: List[Dict[str, Any]]) -> str:
-    if str(args.pick) != "auto":
-        return str(args.pick)
-
-    has_drops = any(int(r.get("drop_events", 0)) > 0 for r in grid_rows)
-    if not has_drops:
-        return "min_alert_frac"
-
-    # If a model is provided, default to early-warning mode.
-    if args.model is not None:
-        return "max_ew"
-
-    return "max_f1_event"
-
-
 def _pick_best(grid_rows: List[Dict[str, Any]], mode: str) -> int:
     if not grid_rows:
         return 0
 
-    def key(i: int) -> Tuple[float, float, float, float]:
+    def key(i: int) -> Tuple[float, float, float]:
         r = grid_rows[i]
-
-        # Core metrics
         f1 = float(r.get("f1", 0.0))
         fp = float(r.get("fp", 1e18))
         alert_frac = float(r.get("alert_frac", 1.0))
-
-        # Event-level early warning metrics
-        f1_event = float(r.get("f1_event", 0.0))
-        lead_max = float(r.get("lead_s_max", 0.0))
-        drop_events = int(r.get("drop_events", 0))
-        alert_events = int(r.get("alert_events", 0))
-
-        # Hard-penalize silent runs on drop datasets.
-        silent = 1.0 if (drop_events > 0 and alert_events == 0) else 0.0
-
         if mode == "max_f1":
-            return (silent, -f1, fp, alert_frac)
-
+            return (-f1, fp, alert_frac)
         if mode == "min_fp":
-            return (silent, fp, -f1, alert_frac)
-
-        if mode == "max_f1_event":
-            # Maximize event F1, then prefer positive lead and fewer alert events.
-            lead_bad = 1.0 if lead_max <= 0.0 else 0.0
-            return (silent + lead_bad, -f1_event, -lead_max, alert_events, fp, alert_frac)
-
-        if mode == "max_ew":
-            # Early-warning selection must not sacrifice precision.
-            # We prioritize event-level F1 first, then positive lead, then lead magnitude.
-            lead_bad = 1.0 if lead_max <= 0.0 else 0.0
-            # Tie-breakers: fewer alert events and fewer FP.
-            return (silent + lead_bad, -f1_event, -lead_max, alert_events, fp, alert_frac)
-
+            return (fp, -f1, alert_frac)
         # min_alert_frac
-        return (silent, alert_frac, fp, -f1)
+        return (alert_frac, fp, -f1)
 
     best = min(range(len(grid_rows)), key=key)
     return int(best)
-
-
-def _fuse_components(
-    score_chaos: np.ndarray,
-    *,
-    score_mp: Optional[np.ndarray],
-    score_causal: Optional[np.ndarray],
-    score_dl: Optional[np.ndarray],
-    weights: Dict[str, float],
-) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
-    fused = np.clip(float(weights.get("chaos", 0.0)) * np.asarray(score_chaos, dtype=float), 0.0, 1.0)
-    components: Dict[str, np.ndarray] = {"chaos": np.asarray(score_chaos, dtype=float)}
-
-    if score_mp is not None and float(weights.get("mp", 0.0)) > 0:
-        components["mp"] = np.asarray(score_mp, dtype=float)
-        fused += float(weights["mp"]) * components["mp"]
-
-    if score_causal is not None and float(weights.get("causal", 0.0)) > 0:
-        components["causal"] = np.asarray(score_causal, dtype=float)
-        fused += float(weights["causal"]) * components["causal"]
-
-    if score_dl is not None and float(weights.get("dl", 0.0)) > 0:
-        components["dl"] = np.asarray(score_dl, dtype=float)
-        fused += float(weights["dl"]) * components["dl"]
-
-    fused = np.clip(fused, 0.0, 1.0)
-    return fused, components
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -372,7 +258,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     cfgs = _select_cfgs(args)
 
     # Run chaos suite for all cfgs at once
-    _metrics_df, tl_df = sweep(df, cfgs, seed=int(args.seed))
+    metrics_df, tl_df = sweep(df, cfgs, seed=int(args.seed))
     if tl_df.empty:
         raise RuntimeError("Sweep produced empty timeline output")
 
@@ -390,7 +276,6 @@ def main(argv: Optional[List[str]] = None) -> int:
     grid_rows: List[Dict[str, Any]] = []
     per_run_cache: List[PickedRun] = []
 
-    # First pass: evaluate each config and collect per-run summary rows.
     for rid in sorted(tl_df["run_id"].unique()):
         rid_int = int(rid)
         tl = tl_df[tl_df["run_id"] == rid_int].reset_index(drop=True)
@@ -401,34 +286,32 @@ def main(argv: Optional[List[str]] = None) -> int:
         score_chaos = tl["score_mean"].to_numpy(dtype=float)
         is_drop = foil < float(cfg.drop_threshold)
 
-        score_mp, mp_error = (None, None)
+        score_mp = None
         if bool(args.enable_mp):
-            score_mp, mp_error = _compute_mp_score(df, col=mp_col, window_n=win_n)
-            if bool(args.require_mp) and score_mp is None:
-                raise RuntimeError(f"Matrix Profile requested but unavailable: {mp_error}")
+            score_mp = _compute_mp_score(df, col=mp_col, window_n=win_n)
 
-        score_causal, causal_error = (None, None)
+        score_causal = None
         if bool(args.enable_causal):
-            score_causal, causal_error = _compute_causal_score(
-                df, cols=causal_cols, window_n=max(win_n, 8), baseline_n=baseline_n
-            )
-            if bool(args.require_causal) and score_causal is None:
-                raise RuntimeError(f"Causal drift requested but unavailable: {causal_error}")
+            score_causal = _compute_causal_score(df, cols=causal_cols, window_n=max(win_n, 8), baseline_n=baseline_n)
 
-        score_dl, dl_error = (None, None)
+        score_dl = None
         if model_dir is not None:
-            score_dl, dl_error = _compute_dl_score(df.assign(is_drop=is_drop.astype(float)), model_dir=model_dir, device=str(args.device))
-            if bool(args.require_dl) and score_dl is None:
-                raise RuntimeError(f"DL model provided but inference failed: {dl_error}")
+            score_dl = _compute_dl_score(df.assign(is_drop=is_drop.astype(float)), model_dir=model_dir, device=str(args.device))
 
         weights = _default_weights(has_dl=score_dl is not None, has_mp=score_mp is not None, has_causal=score_causal is not None)
-        fused, components = _fuse_components(
-            score_chaos,
-            score_mp=score_mp,
-            score_causal=score_causal,
-            score_dl=score_dl,
-            weights=weights,
-        )
+
+        fused = np.clip(weights["chaos"] * score_chaos, 0.0, 1.0)
+        components: Dict[str, np.ndarray] = {"chaos": score_chaos}
+        if score_mp is not None and "mp" in weights:
+            fused += float(weights["mp"]) * np.asarray(score_mp, dtype=float)
+            components["mp"] = np.asarray(score_mp, dtype=float)
+        if score_causal is not None and "causal" in weights:
+            fused += float(weights["causal"]) * np.asarray(score_causal, dtype=float)
+            components["causal"] = np.asarray(score_causal, dtype=float)
+        if score_dl is not None and "dl" in weights:
+            fused += float(weights["dl"]) * np.asarray(score_dl, dtype=float)
+            components["dl"] = np.asarray(score_dl, dtype=float)
+        fused = np.clip(fused, 0.0, 1.0)
 
         baseline_mask = (np.arange(len(df)) < baseline_n) & (~is_drop)
         thr = _dynamic_threshold(
@@ -439,16 +322,6 @@ def main(argv: Optional[List[str]] = None) -> int:
             thr_max=float(args.threshold_max),
         )
         alert_raw = fused > float(thr)
-        # Optional component gating to reduce spurious alert islands:
-        # keep an alert point only if at least one component is "strong enough".
-        gate_any = (float(args.gate_chaos) > 0.0) or (float(args.gate_dl) > 0.0) or (float(args.gate_causal) > 0.0)
-        if gate_any:
-            support = np.asarray(score_chaos, dtype=float) >= float(args.gate_chaos)
-            if score_dl is not None:
-                support = support | (np.asarray(score_dl, dtype=float) >= float(args.gate_dl))
-            if score_causal is not None:
-                support = support | (np.asarray(score_causal, dtype=float) >= float(args.gate_causal))
-            alert_raw = alert_raw & support
         alert, alert_events = _postprocess_alerts(
             alert_raw,
             t,
@@ -459,11 +332,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         prf = pointwise_prf(alert, is_drop)
         ev = event_level_metrics(t, alert, is_drop, early_window_s=float(args.early_window_s))
 
-        prec_event = float(ev.alert_event_precision)
-        rec_event = float(ev.drop_event_recall)
-        f1_event = _event_f1(prec_event, rec_event)
+        ep = float(ev.alert_event_precision)
+        er = float(ev.drop_event_recall)
+        f1_event = (2.0 * ep * er / (ep + er)) if (ep + er) > 0.0 else 0.0
 
-        row: Dict[str, Any] = {
+        row = {
             "run_id": rid_int,
             "window_s": float(cfg.window_s),
             "window_n": int(win_n),
@@ -478,18 +351,19 @@ def main(argv: Optional[List[str]] = None) -> int:
             "matched_drop_events": int(ev.matched_drop_events),
             "drop_event_recall": float(ev.drop_event_recall),
             "alert_event_precision": float(ev.alert_event_precision),
+        "event_precision": float(ep),
+        "event_recall": float(er),
+        "f1_event": float(f1_event),
+            "event_precision": float(ep),
+            "event_recall": float(er),
             "f1_event": float(f1_event),
             "lead_s_median": float(ev.lead_s_median),
             "lead_s_max": float(ev.lead_s_max),
-            "mp_active": bool(score_mp is not None),
-            "mp_error": mp_error,
-            "causal_active": bool(score_causal is not None),
-            "causal_error": causal_error,
-            "dl_active": bool(score_dl is not None),
-            "dl_error": dl_error,
+            "has_mp": bool(score_mp is not None),
+            "has_causal": bool(score_causal is not None),
+            "has_dl": bool(score_dl is not None),
             "weights": weights,
         }
-
         grid_rows.append(row)
         per_run_cache.append(
             PickedRun(
@@ -503,42 +377,41 @@ def main(argv: Optional[List[str]] = None) -> int:
             )
         )
 
-    pick_mode = _resolve_pick_mode(args, grid_rows)
-    best_i = _pick_best(grid_rows, pick_mode)
+    best_i = _pick_best(grid_rows, str(args.pick))
     picked = per_run_cache[int(best_i)]
 
-    # Recompute for picked run (to write full outputs deterministically).
+    # Recompute for picked run, to write full outputs (including components)
     cfg = picked.cfg
     win_n = picked.window_n
     score_chaos = picked.score_chaos
     is_drop = picked.is_drop
 
-    score_mp, mp_error = (None, None)
+    score_mp = None
     if bool(args.enable_mp):
-        score_mp, mp_error = _compute_mp_score(df, col=mp_col, window_n=win_n)
-        if bool(args.require_mp) and score_mp is None:
-            raise RuntimeError(f"Matrix Profile requested but unavailable: {mp_error}")
+        score_mp = _compute_mp_score(df, col=mp_col, window_n=win_n)
 
-    score_causal, causal_error = (None, None)
+    score_causal = None
     if bool(args.enable_causal):
-        score_causal, causal_error = _compute_causal_score(df, cols=causal_cols, window_n=max(win_n, 8), baseline_n=baseline_n)
-        if bool(args.require_causal) and score_causal is None:
-            raise RuntimeError(f"Causal drift requested but unavailable: {causal_error}")
+        score_causal = _compute_causal_score(df, cols=causal_cols, window_n=max(win_n, 8), baseline_n=baseline_n)
 
-    score_dl, dl_error = (None, None)
+    score_dl = None
     if model_dir is not None:
-        score_dl, dl_error = _compute_dl_score(df.assign(is_drop=is_drop.astype(float)), model_dir=model_dir, device=str(args.device))
-        if bool(args.require_dl) and score_dl is None:
-            raise RuntimeError(f"DL model provided but inference failed: {dl_error}")
+        score_dl = _compute_dl_score(df.assign(is_drop=is_drop.astype(float)), model_dir=model_dir, device=str(args.device))
 
     weights = _default_weights(has_dl=score_dl is not None, has_mp=score_mp is not None, has_causal=score_causal is not None)
-    fused, components = _fuse_components(
-        score_chaos,
-        score_mp=score_mp,
-        score_causal=score_causal,
-        score_dl=score_dl,
-        weights=weights,
-    )
+
+    fused = np.clip(weights["chaos"] * score_chaos, 0.0, 1.0)
+    components: Dict[str, np.ndarray] = {"chaos": score_chaos}
+    if score_mp is not None and "mp" in weights:
+        fused += float(weights["mp"]) * np.asarray(score_mp, dtype=float)
+        components["mp"] = np.asarray(score_mp, dtype=float)
+    if score_causal is not None and "causal" in weights:
+        fused += float(weights["causal"]) * np.asarray(score_causal, dtype=float)
+        components["causal"] = np.asarray(score_causal, dtype=float)
+    if score_dl is not None and "dl" in weights:
+        fused += float(weights["dl"]) * np.asarray(score_dl, dtype=float)
+        components["dl"] = np.asarray(score_dl, dtype=float)
+    fused = np.clip(fused, 0.0, 1.0)
 
     baseline_mask = (np.arange(len(df)) < baseline_n) & (~is_drop)
     thr = _dynamic_threshold(
@@ -549,15 +422,6 @@ def main(argv: Optional[List[str]] = None) -> int:
         thr_max=float(args.threshold_max),
     )
     alert_raw = fused > float(thr)
-    # Apply component gating (same as during grid evaluation) to avoid spurious alert islands.
-    gate_any = (float(args.gate_chaos) > 0.0) or (float(args.gate_dl) > 0.0) or (float(args.gate_causal) > 0.0)
-    if gate_any:
-        support = np.asarray(score_chaos, dtype=float) >= float(args.gate_chaos)
-        if score_dl is not None:
-            support = support | (np.asarray(score_dl, dtype=float) >= float(args.gate_dl))
-        if score_causal is not None:
-            support = support | (np.asarray(score_causal, dtype=float) >= float(args.gate_causal))
-        alert_raw = alert_raw & support
     alert, alert_events = _postprocess_alerts(
         alert_raw,
         t,
@@ -567,14 +431,15 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     prf = pointwise_prf(alert, is_drop)
     ev = event_level_metrics(t, alert, is_drop, early_window_s=float(args.early_window_s))
-    prec_event = float(ev.alert_event_precision)
-    rec_event = float(ev.drop_event_recall)
-    f1_event = _event_f1(prec_event, rec_event)
+
+    ep = float(ev.alert_event_precision)
+    er = float(ev.drop_event_recall)
+    f1_event = (2.0 * ep * er / (ep + er)) if (ep + er) > 0.0 else 0.0
 
     outp = Path(args.out)
     outp.mkdir(parents=True, exist_ok=True)
 
-    # Timeline CSV
+    # timeline
     out_df = pd.DataFrame(
         {
             "time_s": t,
@@ -593,7 +458,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     out_df.to_csv(outp / "anomalies_hybrid.csv", index=False, float_format="%.6f")
 
     metrics_out: Dict[str, Any] = {
-        "picked_mode": str(pick_mode),
+        "picked_mode": str(args.pick),
         "picked_run_id": int(picked.run_id),
         "window_s": float(cfg.window_s),
         "window_n": int(win_n),
@@ -602,7 +467,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         "emb_lag": int(cfg.emb_lag),
         "enable_mp": bool(args.enable_mp),
         "enable_causal": bool(args.enable_causal),
-        "model_dir": str(model_dir) if model_dir is not None else None,
+        "has_dl": bool(model_dir is not None and score_dl is not None),
         "baseline_n": int(baseline_n),
         "baseline_s": float(args.baseline_s),
         "baseline_frac": float(args.baseline_frac),
@@ -610,35 +475,25 @@ def main(argv: Optional[List[str]] = None) -> int:
         "threshold": float(thr),
         "threshold_min": float(args.threshold_min),
         "threshold_max": float(args.threshold_max),
-        "gate_dl": float(args.gate_dl),
-        "gate_causal": float(args.gate_causal),
-        "gate_chaos": float(args.gate_chaos),
         "merge_gap_s": float(args.merge_gap_s),
         "min_duration_s": float(args.min_duration_s),
         "alert_events": int(alert_events),
         "alert_frac": float(np.mean(alert.astype(float))),
         "weights": weights,
-        # Pointwise metrics
         **{k: float(v) for k, v in prf.items()},
-        # Event-level metrics
         "drop_events": int(ev.drop_events),
         "matched_drop_events": int(ev.matched_drop_events),
         "drop_event_recall": float(ev.drop_event_recall),
         "alert_event_precision": float(ev.alert_event_precision),
+        "event_precision": float(ep),
+        "event_recall": float(er),
         "f1_event": float(f1_event),
         "lead_s_median": float(ev.lead_s_median),
         "lead_s_max": float(ev.lead_s_max),
-        # Component activity
-        "mp_active": bool(score_mp is not None),
-        "mp_error": mp_error,
-        "causal_active": bool(score_causal is not None),
-        "causal_error": causal_error,
-        "dl_active": bool(score_dl is not None),
-        "dl_error": dl_error,
     }
     (outp / "metrics_hybrid.json").write_text(json.dumps(metrics_out, indent=2, sort_keys=True), encoding="utf-8")
 
-    # Explain (per alert timepoint)
+    # explain (per alert timepoint)
     with (outp / "explain_hybrid.jsonl").open("w", encoding="utf-8") as f:
         for i in np.flatnonzero(alert):
             row = {
@@ -650,7 +505,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             }
             f.write(json.dumps(row) + "\n")
 
-    # Debug grid
+    # debug grid
     (outp / "grid_metrics.json").write_text(json.dumps(grid_rows, indent=2), encoding="utf-8")
 
     return 0

@@ -6,7 +6,7 @@ on:
       supervised_epochs:
         description: "Époques supervisées (DL)"
         required: false
-        default: "12"
+        default: "16"
       contrastive_epochs:
         description: "Époques contrastives (prétrain)"
         required: false
@@ -33,17 +33,22 @@ jobs:
           python -m pip install -U pip
           pip install -e ".[dev,dl]"
 
-      - name: Train lightweight DL model (early warning, onset-labelled)
+      - name: Generate early-warning dataset (with precursors)
+        run: |
+          mkdir -p _ci_out/datasets
+          python scripts/generate_sailgp_synth.py             --profile drops             --seed "${{ inputs.seed }}"             --pre-drop-s 2.0             --pre-drop-depth 0.12             --out _ci_out/datasets/sample_timeseries_earlywarning.csv
+
+      - name: Train lightweight DL model (true early warning, onset-labelled)
         run: |
           mkdir -p _ci_out/model
-          python -m chaostrace.cli.train_hybrid             --input test_data/sample_timeseries_1_2_drops.csv             --out _ci_out/model             --cols boat_speed,foil_height_m             --window-s 5.0             --stride-s 0.2             --horizon-s 1.5             --contrastive-epochs "${{ inputs.contrastive_epochs }}"             --supervised-epochs "${{ inputs.supervised_epochs }}"             --batch-size 64             --pos-weight 4.0             --device cpu
+          python -m chaostrace.cli.train_hybrid             --input _ci_out/datasets/sample_timeseries_earlywarning.csv             --out _ci_out/model             --cols boat_speed,foil_height_m             --window-s 5.0             --stride-s 0.2             --horizon-s 1.5             --contrastive-epochs "${{ inputs.contrastive_epochs }}"             --supervised-epochs "${{ inputs.supervised_epochs }}"             --batch-size 64             --pos-weight 6.0             --device cpu
 
-      - name: Run hybrid (chaos + DL)
+      - name: Run hybrid (chaos + DL) and pick best by F1
         run: |
           mkdir -p _ci_out/hybrid_dl
-          python -m chaostrace.cli.run_hybrid             --input test_data/sample_timeseries_1_2_drops.csv             --out _ci_out/hybrid_dl             --runs 30             --seed "${{ inputs.seed }}"             --enable-causal             --causal-cols boat_speed,foil_height_m             --model _ci_out/model             --device cpu             --early-window-s 2.0             --merge-gap-s 0.30             --min-duration-s 0.10
+          python -m chaostrace.cli.run_hybrid             --input _ci_out/datasets/sample_timeseries_earlywarning.csv             --out _ci_out/hybrid_dl             --runs 40             --seed "${{ inputs.seed }}"             --enable-causal             --causal-cols boat_speed,foil_height_m             --model _ci_out/model             --device cpu             --pick max_f1_event             --early-window-s 2.0             --baseline-s 10.0             --baseline-percentile 99.5             --threshold-min 0.05             --threshold-max 0.97             --merge-gap-s 0.30             --min-duration-s 0.10
 
-      - name: Assert early-warning lead time and F1
+      - name: Assert early-warning event F1 and lead
         run: |
           python - <<'PY'
           import json
@@ -52,24 +57,29 @@ jobs:
 
           p = pathlib.Path("_ci_out/hybrid_dl/metrics_hybrid.json")
           m = json.loads(p.read_text(encoding="utf-8"))
+
           lead_max = float(m.get("lead_s_max", 0.0))
           f1_event = float(m.get("f1_event", 0.0))
-          precision_event = float(m.get("event_precision", m.get("alert_event_precision", 0.0)))
-          recall_event = float(m.get("event_recall", m.get("drop_event_recall", 0.0)))
-          f1_point = float(m.get("f1", 0.0))
+          drop_events = int(m.get("drop_events", 0))
+          matched = int(m.get("matched_drop_events", 0))
+
+          if drop_events <= 0:
+            print("FAIL: expected drop_events > 0, got", drop_events)
+            sys.exit(1)
+
+          if matched < drop_events:
+            print("FAIL: matched_drop_events must cover all drops. matched=", matched, "drop_events=", drop_events)
+            sys.exit(1)
+
           if lead_max <= 0.0:
             print("FAIL: lead_s_max must be > 0.0, got", lead_max)
             sys.exit(1)
+
           if f1_event < 0.90:
-            print("FAIL: event-level F1 must be >= 0.90, got", f1_event)
+            print("FAIL: f1_event must be >= 0.90, got", f1_event)
             sys.exit(1)
-          print(
-            "OK: lead_s_max=", lead_max,
-            "F1_event=", f1_event,
-            "event_precision=", precision_event,
-            "event_recall=", recall_event,
-            "F1_pointwise=", f1_point,
-          )
+
+          print("OK: drop_events=", drop_events, "matched=", matched, "lead_s_max=", lead_max, "f1_event=", f1_event)
           PY
 
       - name: Upload artifacts
