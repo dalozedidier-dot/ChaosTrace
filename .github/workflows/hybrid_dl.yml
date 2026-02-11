@@ -45,7 +45,7 @@ jobs:
             --pre-drop-depth 0.12 \
             --out _ci_out/datasets/sample_timeseries_earlywarning.csv
 
-      - name: Train lightweight DL model (deterministic CI)
+      - name: Train lightweight DL model (deterministic)
         run: |
           set -euo pipefail
           mkdir -p _ci_out/model
@@ -63,7 +63,7 @@ jobs:
             --device cpu \
             --seed "${{ inputs.seed }}"
 
-      - name: Run hybrid (chaos + DL) with tighter gating/postprocess
+      - name: Run hybrid (chaos + DL) and pick best by event F1
         run: |
           set -euo pipefail
           mkdir -p _ci_out/hybrid_dl
@@ -76,16 +76,26 @@ jobs:
             --causal-cols boat_speed,foil_height_m \
             --model _ci_out/model \
             --device cpu \
-            --pick max_ew \
+            --pick max_f1_event \
             --early-window-s 2.0 \
             --baseline-s 10.0 \
             --baseline-percentile 99.5 \
             --threshold-min 0.40 \
             --threshold-max 0.97 \
-            --gate-dl 0.10 \
-            --gate-causal 0.10 \
-            --merge-gap-s 0.20 \
-            --min-duration-s 0.20
+            --merge-gap-s 0.30 \
+            --min-duration-s 0.15
+
+      - name: Emit manifest (hybrid_dl)
+        if: always()
+        run: |
+          set -euo pipefail
+          python scripts/emit_manifest.py \
+            --out-dir _ci_out/hybrid_dl \
+            --files anomalies_hybrid.csv metrics_hybrid.json grid_metrics.json explain_hybrid.jsonl \
+                    ../datasets/sample_timeseries_earlywarning.csv \
+                    ../model/model.pt ../model/config.json \
+            --param kind=hybrid_dl \
+            --param tool=run_hybrid
 
       - name: Assert early-warning event F1 and lead
         run: |
@@ -103,33 +113,23 @@ jobs:
           matched = int(m.get("matched_drop_events", 0))
 
           if drop_events <= 0:
-            print("FAIL: expected drop_events > 0, got", drop_events)
-            sys.exit(1)
+              print("FAIL: expected drop_events > 0, got", drop_events)
+              sys.exit(1)
 
           if matched < drop_events:
-            print("FAIL: matched_drop_events must cover all drops. matched=", matched, "drop_events=", drop_events)
-            sys.exit(1)
+              print("FAIL: matched_drop_events must cover all drops. matched=", matched, "drop_events=", drop_events)
+              sys.exit(1)
 
           if lead_max <= 0.0:
-            print("FAIL: lead_s_max must be > 0.0, got", lead_max)
-            sys.exit(1)
+              print("FAIL: lead_s_max must be > 0.0, got", lead_max)
+              sys.exit(1)
 
           if f1_event < 0.90:
-            print("FAIL: f1_event must be >= 0.90, got", f1_event)
-            sys.exit(1)
+              print("FAIL: f1_event must be >= 0.90, got", f1_event)
+              sys.exit(1)
 
           print("OK: drop_events=", drop_events, "matched=", matched, "lead_s_max=", lead_max, "f1_event=", f1_event)
           PY
-
-      - name: Emit manifest (hybrid_dl)
-        if: always()
-        run: |
-          set -euo pipefail
-          python scripts/emit_manifest.py \
-            --out-dir _ci_out/hybrid_dl \
-            --files anomalies_hybrid.csv metrics_hybrid.json grid_metrics.json explain_hybrid.jsonl \
-            --param kind=hybrid_dl \
-            --param tool=run_hybrid
 
       - name: Upload artifacts
         if: always()

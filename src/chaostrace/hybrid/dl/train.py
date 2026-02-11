@@ -9,6 +9,47 @@ import numpy as np
 import pandas as pd
 
 from .dataset import make_windows
+
+import random
+
+
+def _seed_all(seed: int) -> None:
+    """Best-effort determinism across python/numpy/torch.
+
+    Notes:
+    - CI uses CPU by default; we also set CUDA seeds defensively.
+    - We avoid crashing if deterministic algorithms are unsupported.
+    """
+    torch = _torch()
+    s = int(seed)
+    random.seed(s)
+    np.random.seed(s)
+
+    try:
+        torch.manual_seed(s)
+        if torch.cuda.is_available():  # pragma: no cover
+            torch.cuda.manual_seed_all(s)
+    except Exception:  # pragma: no cover
+        pass
+
+    # Best effort deterministic behavior
+    try:
+        torch.use_deterministic_algorithms(True)
+    except Exception:  # pragma: no cover
+        pass
+    try:
+        torch.backends.cudnn.deterministic = True  # type: ignore[attr-defined]
+        torch.backends.cudnn.benchmark = False  # type: ignore[attr-defined]
+    except Exception:  # pragma: no cover
+        pass
+
+    # Stabilize CPU threading where possible
+    try:
+        torch.set_num_threads(1)
+        torch.set_num_interop_threads(1)
+    except Exception:  # pragma: no cover
+        pass
+
 from .model import HybridNet, ModelConfig
 
 
@@ -58,40 +99,6 @@ def _nt_xent(z1: "Any", z2: "Any", *, temperature: float = 0.2) -> "Any":
     return loss
 
 
-
-def _set_determinism(seed: int, device: str) -> None:
-    """Best-effort determinism for CI runs.
-
-    The goal is to make model init + augmentations reproducible on CPU.
-    """
-    import random
-
-    torch = _torch()
-
-    seed = int(seed)
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if hasattr(torch, "cuda") and torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
-
-    # Stabilize CPU threading (best effort).
-    try:
-        torch.set_num_threads(1)
-        torch.set_num_interop_threads(1)
-    except Exception:
-        pass
-
-    # Determinism flags (best effort).
-    try:
-        torch.use_deterministic_algorithms(True, warn_only=True)
-    except Exception:
-        pass
-
-    if hasattr(torch, "backends") and hasattr(torch.backends, "cudnn"):
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
-
 def train_hybrid_model(
     df: pd.DataFrame,
     *,
@@ -114,7 +121,7 @@ def train_hybrid_model(
     The model is saved to <out_dir>/model.pt and config to <out_dir>/config.json.
     """
     torch = _torch()
-    _set_determinism(int(seed), str(device))
+    _seed_all(int(seed))
     out_dir.mkdir(parents=True, exist_ok=True)
 
     ds = make_windows(
@@ -207,6 +214,8 @@ def train_hybrid_model(
                 "stride_n": int(stride_n),
                 "horizon_n": int(horizon_n),
                 "best_val_loss": float(best_loss),
+                "seed": int(seed),
+                "deterministic_requested": True,
             },
             indent=2,
             sort_keys=True,

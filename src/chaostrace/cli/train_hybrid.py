@@ -33,7 +33,7 @@ def main() -> None:
     ap.add_argument("--lr", type=float, default=3e-4, help="Learning rate")
     ap.add_argument("--pos-weight", type=float, default=3.0, help="Positive class weight for BCE")
     ap.add_argument("--device", default="cpu", help="cpu or cuda")
-    ap.add_argument("--seed", type=int, default=7, help="RNG seed (torch/numpy/python)")
+    ap.add_argument("--seed", type=int, default=7, help="Seed for deterministic training")
 
     args = ap.parse_args()
 

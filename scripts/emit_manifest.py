@@ -5,95 +5,108 @@ import hashlib
 import json
 import os
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any
 
 
-def _sha256_file(p: Path) -> str:
+def _sha256(path: Path) -> str:
     h = hashlib.sha256()
-    with p.open("rb") as f:
+    with path.open("rb") as f:
         for chunk in iter(lambda: f.read(1024 * 1024), b""):
             h.update(chunk)
     return h.hexdigest()
 
 
-def _gh_meta() -> Dict[str, Any]:
+def _github_ctx() -> dict[str, str]:
     keys = [
         "GITHUB_REPOSITORY",
         "GITHUB_SHA",
         "GITHUB_REF",
         "GITHUB_WORKFLOW",
+        "GITHUB_JOB",
         "GITHUB_RUN_ID",
         "GITHUB_RUN_NUMBER",
         "GITHUB_RUN_ATTEMPT",
-        "GITHUB_JOB",
         "GITHUB_ACTOR",
         "RUNNER_OS",
         "RUNNER_ARCH",
     ]
-    return {k.lower(): os.environ.get(k, "") for k in keys if os.environ.get(k) is not None}
+    out: dict[str, str] = {}
+    for k in keys:
+        v = os.environ.get(k)
+        if v is not None:
+            out[k.lower()] = v
+    # Keep backward compatible field names seen in existing artifacts
+    remap = {
+        "github_repository": "github_repository",
+        "github_sha": "github_sha",
+        "github_ref": "github_ref",
+        "github_workflow": "github_workflow",
+        "github_job": "github_job",
+        "github_run_id": "github_run_id",
+        "github_run_number": "github_run_number",
+        "github_run_attempt": "github_run_attempt",
+        "github_actor": "github_actor",
+        "runner_os": "runner_os",
+        "runner_arch": "runner_arch",
+    }
+    fixed: dict[str, str] = {}
+    for k, v in out.items():
+        fixed[remap.get(k, k)] = v
+    return fixed
 
 
-def main(argv: List[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description="Emit a stable manifest.json for CI artifacts.")
-    ap.add_argument("--out-dir", required=True, help="Directory containing artifacts.")
+def _parse_params(items: list[str]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for it in items:
+        if "=" not in it:
+            raise SystemExit(f"--param expects key=value, got: {it!r}")
+        k, v = it.split("=", 1)
+        k = k.strip()
+        v = v.strip()
+        # Keep as string; users can interpret later
+        out[k] = v
+    return out
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="Emit a stable CI manifest (sha256, sizes, context).")
+    ap.add_argument("--out-dir", required=True, help="Directory to write manifest_ci.json into")
     ap.add_argument(
         "--files",
         nargs="+",
         default=[],
-        help="List of filenames (relative to out-dir) to record in the manifest.",
+        help="File paths relative to out-dir (or absolute). Non-existing are recorded with exists=false.",
     )
-    ap.add_argument(
-        "--param",
-        action="append",
-        default=[],
-        help="Extra key=value pairs to include as manifest.params (repeatable).",
-    )
-    ap.add_argument(
-        "--manifest-name",
-        default="manifest_ci.json",
-        help="Output manifest file name (written inside out-dir).",
-    )
-    args = ap.parse_args(argv)
+    ap.add_argument("--param", action="append", default=[], help="Extra key=value params")
+    args = ap.parse_args()
 
-    out_dir = Path(str(args.out_dir))
+    out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    params: Dict[str, str] = {}
-    for item in args.param:
-        if "=" in item:
-            k, v = item.split("=", 1)
-            params[k.strip()] = v.strip()
-        else:
-            params[item.strip()] = ""
-
-    records: List[Dict[str, Any]] = []
+    files = []
     for rel in args.files:
-        rel = str(rel).strip()
-        if not rel:
-            continue
-        p = out_dir / rel
-        if p.exists() and p.is_file():
-            records.append(
-                {
-                    "path": rel,
-                    "exists": True,
-                    "bytes": int(p.stat().st_size),
-                    "sha256": _sha256_file(p),
-                }
-            )
-        else:
-            records.append({"path": rel, "exists": False, "bytes": 0, "sha256": ""})
+        p = Path(rel)
+        if not p.is_absolute():
+            p = (out_dir / rel).resolve()
+        exists = p.exists() and p.is_file()
+        rec = {
+            "path": rel,
+            "exists": bool(exists),
+            "bytes": int(p.stat().st_size) if exists else 0,
+            "sha256": _sha256(p) if exists else None,
+        }
+        files.append(rec)
 
-    manifest: Dict[str, Any] = {
+    payload = {
         "schema_version": 1,
-        "out_dir": str(out_dir.as_posix()),
-        "params": params,
-        "github": _gh_meta(),
-        "files": records,
+        "out_dir": str(out_dir),
+        "github": _github_ctx(),
+        "params": _parse_params(list(args.param)),
+        "files": files,
     }
 
-    (out_dir / str(args.manifest_name)).write_text(
-        json.dumps(manifest, indent=2, sort_keys=True),
+    (out_dir / "manifest_ci.json").write_text(
+        json.dumps(payload, indent=2, sort_keys=True),
         encoding="utf-8",
     )
     return 0
