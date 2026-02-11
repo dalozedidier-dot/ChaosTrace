@@ -259,8 +259,6 @@ def generate_enhanced_viz(
 
     anomalies_path = run_dir / "anomalies.csv"
     manifest_path = run_dir / "manifest.json"
-    metrics_path = run_dir / "metrics.csv"
-
     anomalies = pd.read_csv(anomalies_path)
     manifest = _read_json(manifest_path) if manifest_path.exists() else None
 
