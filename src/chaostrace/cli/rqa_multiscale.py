@@ -43,6 +43,42 @@ def _parse_scales(s: str) -> List[float]:
         raise ValueError("Empty --scales")
     return out
 
+def _auto_scales(
+    time_s: np.ndarray,
+    *,
+    hz: float,
+    emb_dim: int,
+    emb_lag: int,
+) -> List[float]:
+    """Pick defensible window scales for RQA given sampling rate and embedding.
+
+    RQA needs enough points per window to produce non-trivial diagonals/verticals.
+    For low Hz data, tiny windows (3-10s) can be mathematically underpowered.
+    """
+    time_s = np.asarray(time_s, dtype=float)
+    if time_s.size < 2:
+        return [30.0, 60.0, 120.0]
+
+    total_s = float(np.nanmax(time_s) - np.nanmin(time_s))
+    hz = float(hz) if float(hz) > 0 else 10.0
+
+    # Minimum points needed: embedding burn-in + a safety margin for RQA statistics
+    min_pts = max(80, (max(1, emb_dim) - 1) * max(1, emb_lag) + 40)
+    min_s = float(min_pts) / hz
+
+    candidates = [3.0, 5.0, 10.0, 20.0, 30.0, 60.0, 120.0]
+    max_s = max(3.0, 0.5 * total_s)  # keep windows comfortably below half the series
+    scales = [s for s in candidates if s >= min_s and s <= max_s]
+
+    if len(scales) < 3:
+        # Geometric fallback anchored at min_s
+        s0 = min(max(min_s, 10.0), max_s)
+        scales = [s0, min(2.0 * s0, max_s), min(4.0 * s0, max_s)]
+
+    # Deduplicate + sort
+    return sorted({float(f"{s:.6g}") for s in scales})
+
+
 
 def _iqr(x: np.ndarray) -> float:
     x = np.asarray(x, dtype=float)
@@ -117,7 +153,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="ChaosTrace: multiscale RQA (windowed) with early warning score.")
     p.add_argument("--input", required=True, help="CSV input with time_s and series columns.")
     p.add_argument("--out", required=True, help="Output directory.")
-    p.add_argument("--scales", default="3,5,10,20", help="Comma-separated window scales in seconds.")
+    p.add_argument("--scales", default="auto", help="Comma-separated window scales in seconds, or 'auto' to pick defensible scales from sampling rate + embedding.")
     p.add_argument("--series", default="foil_height_m", help="Primary series for RQA.")
     p.add_argument("--drop-threshold", type=float, default=0.30, help="Threshold defining drop regime (for summary stats).")
     p.add_argument("--emb-dim", type=int, default=5)
@@ -199,7 +235,11 @@ def main(argv: List[str] | None = None) -> int:
     if hz <= 0:
         hz = 10.0
 
-    scales = _parse_scales(str(args.scales))
+    scales_arg = str(args.scales).strip().lower()
+    if scales_arg == "auto":
+        scales = _auto_scales(time_s, hz=float(hz), emb_dim=int(args.emb_dim), emb_lag=int(args.emb_lag))
+    else:
+        scales = _parse_scales(str(args.scales))
 
     adv_cfg = RQAAdvancedConfig(
         emb_dim=int(args.emb_dim),
