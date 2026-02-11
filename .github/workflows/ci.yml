@@ -128,7 +128,7 @@ jobs:
             --out _ci_out/hybrid_core \
             --runs 20 \
             --seed 7 \
-            --pick max_f1
+            --pick max_f1_event
 
       - name: Upload artifacts
         if: always()
