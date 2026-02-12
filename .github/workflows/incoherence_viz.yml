@@ -39,6 +39,14 @@ on:
         description: "Ajouter la surface de la sphère (utile avec sphere=true)"
         required: false
         default: "true"
+      time_path:
+        description: "Relier les points en 3D dans l ordre temporel"
+        required: false
+        default: "true"
+      time_path_mode:
+        description: "Trajectoire 3D: level (segments colorés) ou single (ligne grise)"
+        required: false
+        default: "level"
 
 permissions:
   contents: read
@@ -74,13 +82,17 @@ jobs:
           mkdir -p _ci_out/incoherence_viz
           python -m chaostrace.cli.run_sweep             --input "${{ inputs.input_csv }}"             --out _ci_out/incoherence_viz             --runs "${{ inputs.runs }}"             --seed "${{ inputs.seed }}"
 
-      - name: Build incoherence vectors + plots by variable (all run_id + 3D Plotly)
+      - name: Build incoherence vectors + plots by variable (all run_id + 3D Plotly + time path)
         run: |
           set -euo pipefail
           SPHERE_FLAGS=""
           if [ "${{ inputs.sphere }}" = "true" ]; then SPHERE_FLAGS="$SPHERE_FLAGS --sphere"; fi
           if [ "${{ inputs.sphere_surface }}" = "true" ]; then SPHERE_FLAGS="$SPHERE_FLAGS --sphere-surface"; fi
-          python scripts/viz_incoherence.py $SPHERE_FLAGS             --run-dir _ci_out/incoherence_viz             --input "${{ inputs.input_csv }}"             --vars "${{ inputs.vars }}"             --out _ci_out/incoherence_viz/viz_incoherence             --knn-k "${{ inputs.knn_k }}"             --max-eval-points "${{ inputs.max_eval_points }}"             --max-points-3d "${{ inputs.max_points_3d }}"             --copy-best
+
+          TP_FLAGS=""
+          if [ "${{ inputs.time_path }}" = "true" ]; then TP_FLAGS="$TP_FLAGS --time-path"; fi
+
+          python scripts/viz_incoherence.py $SPHERE_FLAGS $TP_FLAGS             --time-path-mode "${{ inputs.time_path_mode }}"             --run-dir _ci_out/incoherence_viz             --input "${{ inputs.input_csv }}"             --vars "${{ inputs.vars }}"             --out _ci_out/incoherence_viz/viz_incoherence             --knn-k "${{ inputs.knn_k }}"             --max-eval-points "${{ inputs.max_eval_points }}"             --max-points-3d "${{ inputs.max_points_3d }}"             --copy-best
 
       - name: Emit manifest
         if: always()
@@ -89,7 +101,7 @@ jobs:
           cd _ci_out/incoherence_viz
           FILES=$(find . -type f -maxdepth 6 -print | sed 's|^\./||')
           cd ../..
-          python scripts/emit_manifest.py             --out-dir _ci_out/incoherence_viz             --files $FILES             --param kind=incoherence_viz             --param tool=viz_incoherence_plotly
+          python scripts/emit_manifest.py             --out-dir _ci_out/incoherence_viz             --files $FILES             --param kind=incoherence_viz             --param tool=viz_incoherence_plotly_timepath
 
       - name: Upload artifacts
         if: always()

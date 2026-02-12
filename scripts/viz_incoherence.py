@@ -41,6 +41,8 @@ class Cfg:
     max_points_3d: int = 5000
     sphere: bool = False
     sphere_surface: bool = False
+    time_path: bool = True
+    time_path_mode: str = "level"  # "level" or "single"
 
 
 def _load_manifest(run_dir: Path) -> dict:
@@ -257,6 +259,21 @@ def add_sphere_surface(fig: go.Figure, radius: float = 1.0, steps: int = 30) -> 
     )
 
 
+def _iter_level_segments(levels: np.ndarray) -> list[tuple[int, int, int]]:
+    lv = np.asarray(levels, dtype=int)
+    n = lv.size
+    if n <= 1:
+        return [(0, max(0, n - 1), int(lv[0]) if n else 0)]
+    segs: list[tuple[int, int, int]] = []
+    start = 0
+    for i in range(1, n):
+        if int(lv[i]) != int(lv[i - 1]):
+            segs.append((start, i - 1, int(lv[start])))
+            start = i
+    segs.append((start, n - 1, int(lv[start])))
+    return segs
+
+
 def plot_timeseries_with_levels(
     out_png: Path,
     t: np.ndarray,
@@ -316,6 +333,8 @@ def plot_embedding_3d_html(
     max_points: int,
     sphere: bool,
     sphere_surface: bool,
+    time_path: bool,
+    time_path_mode: str,
 ):
     n = coords3.shape[0]
     idx = _uniform_subsample_idx(n, max_points)
@@ -333,12 +352,73 @@ def plot_embedding_3d_html(
     if sphere and sphere_surface:
         add_sphere_surface(fig, radius=1.0, steps=30)
 
+    # Time-linked trajectory (optional)
+    if time_path and coords3_s.shape[0] >= 2:
+        if time_path_mode not in {"level", "single"}:
+            time_path_mode = "level"
+
+        if time_path_mode == "single":
+            custom = np.stack([t_s, score_s, value_s], axis=1)
+            fig.add_trace(
+                go.Scatter3d(
+                    x=coords3_s[:, 0],
+                    y=coords3_s[:, 1],
+                    z=coords3_s[:, 2],
+                    mode="lines",
+                    name="time_path",
+                    line={"width": 2, "color": "rgba(120,120,120,0.55)"},
+                    customdata=custom,
+                    hovertemplate=(
+                        "PC1=%{x:.3f}<br>"
+                        "PC2=%{y:.3f}<br>"
+                        "PC3=%{z:.3f}<br>"
+                        "time_s=%{customdata[0]:.3f}<br>"
+                        "score=%{customdata[1]:.6f}<br>"
+                        f"{value_name}=%{{customdata[2]:.6f}}<extra></extra>"
+                    ),
+                    showlegend=False,
+                )
+            )
+        else:
+            # Split into segments with constant level to get a colored trajectory by instability level.
+            segs = _iter_level_segments(lvl_s)
+            shown_level = {0: False, 1: False, 2: False, 3: False}
+            for a, b, lev in segs:
+                if b <= a:
+                    continue
+                xs = coords3_s[a : b + 1, 0]
+                ys = coords3_s[a : b + 1, 1]
+                zs = coords3_s[a : b + 1, 2]
+                custom = np.stack([t_s[a : b + 1], score_s[a : b + 1], value_s[a : b + 1]], axis=1)
+                show_legend = not shown_level.get(lev, False)
+                shown_level[lev] = True
+                fig.add_trace(
+                    go.Scatter3d(
+                        x=xs,
+                        y=ys,
+                        z=zs,
+                        mode="lines",
+                        name=f"time_path_{LEVEL_NAMES.get(lev, str(lev))}",
+                        line={"width": 3, "color": LEVEL_COLORS.get(lev, "#888888")},
+                        customdata=custom,
+                        hovertemplate=(
+                            "PC1=%{x:.3f}<br>"
+                            "PC2=%{y:.3f}<br>"
+                            "PC3=%{z:.3f}<br>"
+                            "time_s=%{customdata[0]:.3f}<br>"
+                            "score=%{customdata[1]:.6f}<br>"
+                            f"{value_name}=%{{customdata[2]:.6f}}<extra></extra>"
+                        ),
+                        showlegend=show_legend,
+                    )
+                )
+
+    # Colored markers by level
     for k in range(4):
         m = lvl_s == k
         if not np.any(m):
             continue
-
-        customdata = np.stack([t_s[m], score_s[m], value_s[m]], axis=1)
+        custom = np.stack([t_s[m], score_s[m], value_s[m]], axis=1)
         fig.add_trace(
             go.Scatter3d(
                 x=coords3_s[m, 0],
@@ -346,8 +426,8 @@ def plot_embedding_3d_html(
                 z=coords3_s[m, 2],
                 mode="markers",
                 name=LEVEL_NAMES[k],
-                marker={"size": 3, "color": LEVEL_COLORS[k], "opacity": 0.80},
-                customdata=customdata,
+                marker={"size": 3, "color": LEVEL_COLORS[k], "opacity": 0.85},
+                customdata=custom,
                 hovertemplate=(
                     "PC1=%{x:.3f}<br>"
                     "PC2=%{y:.3f}<br>"
@@ -359,11 +439,7 @@ def plot_embedding_3d_html(
             )
         )
 
-    scene = {
-        "xaxis_title": "PC1",
-        "yaxis_title": "PC2",
-        "zaxis_title": "PC3",
-    }
+    scene = {"xaxis_title": "PC1", "yaxis_title": "PC2", "zaxis_title": "PC3"}
     if sphere:
         scene["xaxis"] = {"range": [-1.05, 1.05]}
         scene["yaxis"] = {"range": [-1.05, 1.05]}
@@ -480,6 +556,8 @@ def process_run(
         cfg.max_points_3d,
         False,
         False,
+        cfg.time_path,
+        cfg.time_path_mode,
     )
     for v in cfg.variables:
         plot_embedding_3d_html(
@@ -494,6 +572,8 @@ def process_run(
             cfg.max_points_3d,
             False,
             False,
+            cfg.time_path,
+            cfg.time_path_mode,
         )
 
     # Sphere projection views (optional)
@@ -510,6 +590,8 @@ def process_run(
             cfg.max_points_3d,
             True,
             cfg.sphere_surface,
+            cfg.time_path,
+            cfg.time_path_mode,
         )
         for v in cfg.variables:
             plot_embedding_3d_html(
@@ -524,6 +606,8 @@ def process_run(
                 cfg.max_points_3d,
                 True,
                 cfg.sphere_surface,
+                cfg.time_path,
+                cfg.time_path_mode,
             )
 
     rows = []
@@ -551,6 +635,8 @@ def process_run(
         "max_points_3d": int(cfg.max_points_3d),
         "sphere": bool(cfg.sphere),
         "sphere_surface": bool(cfg.sphere_surface),
+        "time_path": bool(cfg.time_path),
+        "time_path_mode": str(cfg.time_path_mode),
     }
     (run_out / "run_meta.json").write_text(json.dumps(run_meta, indent=2), encoding="utf-8")
 
@@ -570,6 +656,13 @@ def main() -> int:
     ap.add_argument("--max-points-3d", type=int, default=5000)
     ap.add_argument("--sphere", action="store_true", help="Ajoute en plus une projection sur sphère unité")
     ap.add_argument("--sphere-surface", action="store_true", help="Ajoute la surface de la sphère (si --sphere)")
+    ap.add_argument("--time-path", action="store_true", help="Relie les points dans l ordre temporel (3D)")
+    ap.add_argument(
+        "--time-path-mode",
+        default="level",
+        choices=["level", "single"],
+        help="Mode du tracé temporel: level (segments colorés) ou single (ligne grise)",
+    )
     ap.add_argument("--q-stable", type=float, default=0.50)
     ap.add_argument("--q-mild", type=float, default=0.80)
     ap.add_argument("--q-unstable", type=float, default=0.95)
@@ -613,6 +706,8 @@ def main() -> int:
         max_points_3d=int(args.max_points_3d),
         sphere=bool(args.sphere),
         sphere_surface=bool(args.sphere_surface),
+        time_path=bool(args.time_path),
+        time_path_mode=str(args.time_path_mode),
     )
 
     run_ids_to_process = [int(args.run_id)] if args.run_id is not None else run_ids
