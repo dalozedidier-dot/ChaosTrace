@@ -1,0 +1,83 @@
+name: incoherence_viz
+
+on:
+  workflow_dispatch:
+    inputs:
+      input_csv:
+        description: "CSV d'entrée"
+        required: false
+        default: "test_data/sample_timeseries_1_2_drops.csv"
+      vars:
+        description: "Variables physiques (colonnes CSV) séparées par des virgules"
+        required: false
+        default: "foil_height_m,boat_speed,wind_shear,wave_height"
+      runs:
+        description: "Nombre de runs sweep"
+        required: false
+        default: "3"
+      seed:
+        description: "Seed RNG"
+        required: false
+        default: "7"
+      knn_k:
+        description: "K voisins pour gradient local"
+        required: false
+        default: "25"
+      max_eval_points:
+        description: "Sous échantillonnage gradient (0 = full)"
+        required: false
+        default: "300"
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    env:
+      OMP_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      PYTHONHASHSEED: "${{ inputs.seed }}"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: |
+          set -euo pipefail
+          python -m pip install -U pip
+          pip install -e ".[dev]"
+
+      - name: Run sweep
+        run: |
+          set -euo pipefail
+          mkdir -p _ci_out/incoherence_viz
+          python -m chaostrace.cli.run_sweep             --input "${{ inputs.input_csv }}"             --out _ci_out/incoherence_viz             --runs "${{ inputs.runs }}"             --seed "${{ inputs.seed }}"
+
+      - name: Build incoherence vectors + plots by variable
+        run: |
+          set -euo pipefail
+          python scripts/viz_incoherence.py             --run-dir _ci_out/incoherence_viz             --input "${{ inputs.input_csv }}"             --vars "${{ inputs.vars }}"             --out _ci_out/incoherence_viz/viz_incoherence             --knn-k "${{ inputs.knn_k }}"             --max-eval-points "${{ inputs.max_eval_points }}"
+
+      - name: Emit manifest
+        if: always()
+        run: |
+          set -euo pipefail
+          cd _ci_out/incoherence_viz
+          FILES=$(find . -type f -maxdepth 3 -print | sed 's|^\./||')
+          cd ../..
+          python scripts/emit_manifest.py             --out-dir _ci_out/incoherence_viz             --files $FILES             --param kind=incoherence_viz             --param tool=viz_incoherence
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: incoherence_viz_run${{ github.run_id }}_a${{ github.run_attempt }}
+          path: _ci_out/incoherence_viz/
