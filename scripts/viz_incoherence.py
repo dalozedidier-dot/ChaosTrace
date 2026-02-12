@@ -224,9 +224,9 @@ def plot_var(out_png: Path, t: np.ndarray, v: np.ndarray, inst: np.ndarray, lvl:
     h2, l2 = ax2.get_legend_handles_labels()
     labels = []
     handles = []
-    for h, l in list(zip(h1, l1)) + list(zip(h2, l2)):
-        if l not in labels:
-            labels.append(l)
+    for h, label in list(zip(h1, l1)) + list(zip(h2, l2)):
+        if label not in labels:
+            labels.append(label)
             handles.append(h)
     ax1.legend(handles, labels, loc="upper right")
 
