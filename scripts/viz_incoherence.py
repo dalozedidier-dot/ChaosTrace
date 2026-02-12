@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence, Tuple
@@ -10,6 +11,7 @@ from typing import Sequence, Tuple
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
 from scipy.spatial import cKDTree
 
 
@@ -69,9 +71,9 @@ def build_multivariate_embedding(
 
     t = df[time_col].to_numpy(dtype=float)
 
-    blocks = []
+    blocks: list[np.ndarray] = []
     coord_map: list[tuple[str, int]] = []
-    n_eff = None
+    n_eff: int | None = None
 
     for v in variables:
         emb = _takens_1d(df[v].to_numpy(dtype=float), dim=dim, lag=lag)
@@ -197,7 +199,28 @@ def levels_from_quantiles(x: np.ndarray, q50: float, q80: float, q95: float) -> 
     return lvl
 
 
-def plot_var(out_png: Path, t: np.ndarray, v: np.ndarray, inst: np.ndarray, lvl: np.ndarray, name: str, suffix: str):
+def pca3(X: np.ndarray) -> np.ndarray:
+    X = np.asarray(X, dtype=float)
+    Xc = X - np.nanmean(X, axis=0, keepdims=True)
+    Xc = np.where(np.isfinite(Xc), Xc, 0.0)
+    U, S, _Vt = np.linalg.svd(Xc, full_matrices=False)
+    m = min(3, U.shape[1])
+    coords = U[:, :m] * S[:m]
+    if m < 3:
+        pad = np.zeros((coords.shape[0], 3 - m), dtype=float)
+        coords = np.hstack([coords, pad])
+    return coords
+
+
+def plot_timeseries_with_levels(
+    out_png: Path,
+    t: np.ndarray,
+    v: np.ndarray,
+    contrib: np.ndarray,
+    lvl: np.ndarray,
+    name: str,
+    suffix: str,
+):
     fig, ax1 = plt.subplots()
     ax1.plot(t, v, linewidth=1.2, label=name)
     ax1.set_xlabel("time_s")
@@ -217,17 +240,17 @@ def plot_var(out_png: Path, t: np.ndarray, v: np.ndarray, inst: np.ndarray, lvl:
             )
 
     ax2 = ax1.twinx()
-    ax2.plot(t, inst, linewidth=1.0, alpha=0.60, label="instability_index")
-    ax2.set_ylabel("instability_index")
+    ax2.plot(t, contrib, linewidth=1.0, alpha=0.60, label="incoherence_contrib")
+    ax2.set_ylabel("incoherence_contrib")
 
     h1, l1 = ax1.get_legend_handles_labels()
     h2, l2 = ax2.get_legend_handles_labels()
-    labels = []
+    labels: list[str] = []
     handles = []
-    for h, label in list(zip(h1, l1)) + list(zip(h2, l2)):
-        if label not in labels:
-            labels.append(label)
-            handles.append(h)
+    for handle, lab in list(zip(h1, l1)) + list(zip(h2, l2)):
+        if lab not in labels:
+            labels.append(lab)
+            handles.append(handle)
     ax1.legend(handles, labels, loc="upper right")
 
     ax1.set_title(f"{name} | instability levels ({suffix})")
@@ -236,35 +259,48 @@ def plot_var(out_png: Path, t: np.ndarray, v: np.ndarray, inst: np.ndarray, lvl:
     plt.close(fig)
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--run-dir", required=True)
-    ap.add_argument("--input", default=None)
-    ap.add_argument("--out", default=None)
-    ap.add_argument("--run-id", type=int, default=None)
-    ap.add_argument("--vars", default="foil_height_m,boat_speed,wind_shear,wave_height")
-    ap.add_argument("--knn-k", type=int, default=25)
-    ap.add_argument("--ridge", type=float, default=1e-3)
-    ap.add_argument("--max-eval-points", type=int, default=300)
-    ap.add_argument("--q-stable", type=float, default=0.50)
-    ap.add_argument("--q-mild", type=float, default=0.80)
-    ap.add_argument("--q-unstable", type=float, default=0.95)
-    args = ap.parse_args()
+def plot_embedding_3d(
+    out_png: Path,
+    coords3: np.ndarray,
+    lvl: np.ndarray,
+    title: str,
+):
+    fig = plt.figure()
+    ax = fig.add_subplot(111, projection="3d")
+    ax.set_title(title)
+    ax.set_xlabel("PC1")
+    ax.set_ylabel("PC2")
+    ax.set_zlabel("PC3")
 
-    run_dir = Path(args.run_dir)
-    out_dir = Path(args.out) if args.out else (run_dir / "viz_incoherence")
-    out_dir.mkdir(parents=True, exist_ok=True)
+    for k in range(4):
+        m = lvl == k
+        if np.any(m):
+            ax.scatter(
+                coords3[m, 0],
+                coords3[m, 1],
+                coords3[m, 2],
+                s=6,
+                alpha=0.75,
+                color=LEVEL_COLORS[k],
+                label=LEVEL_NAMES[k],
+            )
+    ax.legend(loc="upper right")
+    fig.tight_layout()
+    fig.savefig(out_png, dpi=170)
+    plt.close(fig)
 
-    metrics = pd.read_csv(run_dir / "metrics.csv")
-    tl_all = pd.read_csv(run_dir / "anomalies.csv")
 
-    if args.run_id is None:
-        mani = _load_manifest(run_dir)
-        rid = mani.get("params", {}).get("run_choice")
-        run_id = int(rid) if rid is not None else int(metrics.sort_values("run_id").iloc[0]["run_id"])
-    else:
-        run_id = int(args.run_id)
-
+def process_run(
+    *,
+    run_id: int,
+    run_dir: Path,
+    out_base: Path,
+    input_csv: Path,
+    df: pd.DataFrame,
+    metrics: pd.DataFrame,
+    anomalies: pd.DataFrame,
+    cfg: Cfg,
+) -> Path:
     row = metrics.loc[metrics["run_id"] == run_id]
     if row.empty:
         raise ValueError(f"run_id {run_id} absent de metrics.csv")
@@ -272,23 +308,9 @@ def main() -> int:
     emb_dim = int(row.iloc[0].get("emb_dim", 5))
     emb_lag = int(row.iloc[0].get("emb_lag", 8))
 
-    tl = tl_all[tl_all["run_id"] == run_id].reset_index(drop=True)
+    tl = anomalies[anomalies["run_id"] == run_id].reset_index(drop=True)
     if tl.empty:
         raise ValueError(f"run_id {run_id} absent de anomalies.csv")
-
-    input_csv = _resolve_input_path(run_dir, args.input)
-    df = pd.read_csv(input_csv)
-
-    variables = tuple([x.strip() for x in str(args.vars).split(",") if x.strip()])
-    cfg = Cfg(
-        variables=variables,
-        knn_k=int(args.knn_k),
-        ridge=float(args.ridge),
-        max_eval_points=int(args.max_eval_points),
-        q_stable=float(args.q_stable),
-        q_mild=float(args.q_mild),
-        q_unstable=float(args.q_unstable),
-    )
 
     X, time_sub, coord_map = build_multivariate_embedding(df, cfg.variables, cfg.time_col, emb_dim, emb_lag)
     if X.size == 0:
@@ -304,20 +326,23 @@ def main() -> int:
     infl = np.where(np.isfinite(infl), infl, 1.0)
 
     instability_global = grad_norm * infl * (1.0 + aniso)
+    lvl_global = levels_from_quantiles(instability_global, cfg.q_stable, cfg.q_mild, cfg.q_unstable)
 
     var_to_cols = {v: [] for v in cfg.variables}
-    for j, (v, lag_idx) in enumerate(coord_map):
-        if v in var_to_cols:
-            var_to_cols[v].append(j)
+    for j, (var_name, lag_idx) in enumerate(coord_map):
+        if var_name in var_to_cols:
+            var_to_cols[var_name].append(j)
 
-    contrib = {}
-    levels = {}
+    contrib: dict[str, np.ndarray] = {}
+    levels: dict[str, np.ndarray] = {}
     for v in cfg.variables:
         cols = var_to_cols[v]
         contrib[v] = (np.sum(np.abs(G[:, cols]), axis=1) if cols else np.zeros(X.shape[0])) * infl
         levels[v] = levels_from_quantiles(contrib[v], cfg.q_stable, cfg.q_mild, cfg.q_unstable)
 
-    out_csv = out_dir / "incoherence_vectors.csv"
+    run_out = out_base / f"run_{run_id}"
+    run_out.mkdir(parents=True, exist_ok=True)
+
     data = {
         "time_s": time_sub,
         "score": score,
@@ -325,20 +350,46 @@ def main() -> int:
         "knn_mean_dist": knn_mean,
         "knn_inflation": infl,
         "anisotropy": aniso,
-        "instability": instability_global,
+        "instability_global": instability_global,
+        "level_global": lvl_global,
     }
     for v in cfg.variables:
         data[f"contrib_{v}"] = contrib[v]
         data[f"level_{v}"] = levels[v]
     for j in range(G.shape[1]):
-        v, lag_idx = coord_map[j]
-        data[f"g_{j:02d}_{v}_lag{lag_idx}"] = G[:, j]
-    pd.DataFrame(data).to_csv(out_csv, index=False, float_format="%.6f")
+        var_name, lag_idx = coord_map[j]
+        data[f"g_{j:02d}_{var_name}_lag{lag_idx}"] = G[:, j]
+
+    pd.DataFrame(data).to_csv(run_out / "incoherence_vectors.csv", index=False, float_format="%.6f")
 
     suffix = f"run_id={run_id} dim={emb_dim} lag={emb_lag} k={cfg.knn_k}"
+
     for v in cfg.variables:
         series = df[v].to_numpy(dtype=float)[: X.shape[0]]
-        plot_var(out_dir / f"incoherence_{v}.png", time_sub, series, contrib[v], levels[v], v, suffix)
+        plot_timeseries_with_levels(
+            run_out / f"incoherence_{v}.png",
+            time_sub,
+            series,
+            contrib[v],
+            levels[v],
+            v,
+            suffix,
+        )
+
+    coords3 = pca3(X)
+    plot_embedding_3d(
+        run_out / "incoherence_embedding_3d_global.png",
+        coords3,
+        lvl_global,
+        f"Embedding 3D (PCA) | global | {suffix}",
+    )
+    for v in cfg.variables:
+        plot_embedding_3d(
+            run_out / f"incoherence_embedding_3d_{v}.png",
+            coords3,
+            levels[v],
+            f"Embedding 3D (PCA) | {v} | {suffix}",
+        )
 
     rows = []
     for v in cfg.variables:
@@ -351,11 +402,127 @@ def main() -> int:
                 "critical_frac": float(np.mean(levels[v] == 3)),
             }
         )
-    pd.DataFrame(rows).sort_values("p95_contrib", ascending=False).to_csv(
-        out_dir / "incoherence_summary.csv", index=False
+    pd.DataFrame(rows).sort_values("p95_contrib", ascending=False).to_csv(run_out / "incoherence_summary.csv", index=False)
+
+    run_meta = {
+        "run_id": int(run_id),
+        "emb_dim": int(emb_dim),
+        "emb_lag": int(emb_lag),
+        "score_mean_metrics": float(row.iloc[0].get("score_mean", float("nan"))),
+        "input_csv": str(input_csv),
+        "variables": list(cfg.variables),
+        "knn_k": int(cfg.knn_k),
+        "max_eval_points": int(cfg.max_eval_points),
+    }
+    (run_out / "run_meta.json").write_text(json.dumps(run_meta, indent=2), encoding="utf-8")
+
+    return run_out
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--run-dir", required=True)
+    ap.add_argument("--input", default=None)
+    ap.add_argument("--out", default=None)
+    ap.add_argument("--run-id", type=int, default=None, help="Si fourni, ne génère que run_id")
+    ap.add_argument("--vars", default="foil_height_m,boat_speed,wind_shear,wave_height")
+    ap.add_argument("--knn-k", type=int, default=25)
+    ap.add_argument("--ridge", type=float, default=1e-3)
+    ap.add_argument("--max-eval-points", type=int, default=300)
+    ap.add_argument("--q-stable", type=float, default=0.50)
+    ap.add_argument("--q-mild", type=float, default=0.80)
+    ap.add_argument("--q-unstable", type=float, default=0.95)
+    ap.add_argument("--copy-best", action="store_true", help="Copie le meilleur run vers out/best")
+    args = ap.parse_args()
+
+    run_dir = Path(args.run_dir)
+    out_base = Path(args.out) if args.out else (run_dir / "viz_incoherence")
+    out_base.mkdir(parents=True, exist_ok=True)
+
+    metrics = pd.read_csv(run_dir / "metrics.csv")
+    anomalies = pd.read_csv(run_dir / "anomalies.csv")
+
+    if "run_id" not in metrics.columns:
+        raise ValueError("metrics.csv ne contient pas la colonne run_id")
+    if "score_mean" not in metrics.columns:
+        raise ValueError("metrics.csv ne contient pas la colonne score_mean")
+    if "run_id" not in anomalies.columns:
+        raise ValueError("anomalies.csv ne contient pas la colonne run_id")
+
+    run_ids = sorted(int(x) for x in metrics["run_id"].dropna().unique().tolist())
+    if not run_ids:
+        raise ValueError("Aucun run_id dans metrics.csv")
+
+    best_row = metrics.loc[metrics["score_mean"].astype(float).idxmax()]
+    best_run_id = int(best_row["run_id"])
+    best_score = float(best_row["score_mean"])
+
+    input_csv = _resolve_input_path(run_dir, args.input)
+    df = pd.read_csv(input_csv)
+
+    variables = tuple([x.strip() for x in str(args.vars).split(",") if x.strip()])
+    cfg = Cfg(
+        variables=variables,
+        knn_k=int(args.knn_k),
+        ridge=float(args.ridge),
+        max_eval_points=int(args.max_eval_points),
+        q_stable=float(args.q_stable),
+        q_mild=float(args.q_mild),
+        q_unstable=float(args.q_unstable),
     )
 
-    print(f"OK -> {out_dir}")
+    if args.run_id is not None:
+        run_ids_to_process = [int(args.run_id)]
+    else:
+        run_ids_to_process = run_ids
+
+    index_rows = []
+    produced_dirs: dict[int, Path] = {}
+    for rid in run_ids_to_process:
+        out_dir = process_run(
+            run_id=rid,
+            run_dir=run_dir,
+            out_base=out_base,
+            input_csv=input_csv,
+            df=df,
+            metrics=metrics,
+            anomalies=anomalies,
+            cfg=cfg,
+        )
+        produced_dirs[rid] = out_dir
+        row = metrics.loc[metrics["run_id"] == rid].iloc[0]
+        index_rows.append(
+            {
+                "run_id": rid,
+                "score_mean": float(row.get("score_mean", float("nan"))),
+                "window_s": float(row.get("window_s", float("nan"))),
+                "drop_threshold": float(row.get("drop_threshold", float("nan"))),
+                "emb_dim": int(row.get("emb_dim", 0)),
+                "emb_lag": int(row.get("emb_lag", 0)),
+                "out_dir": str(out_dir),
+            }
+        )
+
+    pd.DataFrame(index_rows).sort_values("score_mean", ascending=False).to_csv(out_base / "runs_index.csv", index=False)
+
+    (out_base / "best_run.txt").write_text(
+        f"best_run_id={best_run_id}\nscore_mean={best_score:.6f}\n",
+        encoding="utf-8",
+    )
+
+    if args.copy_best:
+        src = produced_dirs.get(best_run_id)
+        if src is not None:
+            best_dir = out_base / "best"
+            if best_dir.exists():
+                shutil.rmtree(best_dir)
+            shutil.copytree(src, best_dir)
+            (best_dir / "BEST_FROM.txt").write_text(
+                f"Copie de {src.name}. best_run_id={best_run_id}. score_mean={best_score:.6f}\n",
+                encoding="utf-8",
+            )
+
+    print(f"OK -> {out_base} | best_run_id={best_run_id} score_mean={best_score:.6f}")
     return 0
 
 

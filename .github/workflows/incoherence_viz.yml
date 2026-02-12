@@ -61,17 +61,17 @@ jobs:
           mkdir -p _ci_out/incoherence_viz
           python -m chaostrace.cli.run_sweep             --input "${{ inputs.input_csv }}"             --out _ci_out/incoherence_viz             --runs "${{ inputs.runs }}"             --seed "${{ inputs.seed }}"
 
-      - name: Build incoherence vectors + plots by variable
+      - name: Build incoherence vectors + plots by variable (all run_id + 3D)
         run: |
           set -euo pipefail
-          python scripts/viz_incoherence.py             --run-dir _ci_out/incoherence_viz             --input "${{ inputs.input_csv }}"             --vars "${{ inputs.vars }}"             --out _ci_out/incoherence_viz/viz_incoherence             --knn-k "${{ inputs.knn_k }}"             --max-eval-points "${{ inputs.max_eval_points }}"
+          python scripts/viz_incoherence.py             --run-dir _ci_out/incoherence_viz             --input "${{ inputs.input_csv }}"             --vars "${{ inputs.vars }}"             --out _ci_out/incoherence_viz/viz_incoherence             --knn-k "${{ inputs.knn_k }}"             --max-eval-points "${{ inputs.max_eval_points }}"             --copy-best
 
       - name: Emit manifest
         if: always()
         run: |
           set -euo pipefail
           cd _ci_out/incoherence_viz
-          FILES=$(find . -type f -maxdepth 3 -print | sed 's|^\./||')
+          FILES=$(find . -type f -maxdepth 6 -print | sed 's|^\./||')
           cd ../..
           python scripts/emit_manifest.py             --out-dir _ci_out/incoherence_viz             --files $FILES             --param kind=incoherence_viz             --param tool=viz_incoherence
 
