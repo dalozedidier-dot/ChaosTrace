@@ -11,8 +11,16 @@ from typing import Sequence, Tuple
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
 from scipy.spatial import cKDTree
+
+try:
+    import plotly.graph_objects as go
+except Exception as exc:  # pragma: no cover
+    raise SystemExit(
+        "Plotly est requis pour la visualisation 3D interactive. "
+        "Installe le paquet plotly, puis relance. "
+        f"Erreur import: {exc!r}"
+    ) from exc
 
 
 LEVEL_NAMES = {0: "stable", 1: "mild", 2: "unstable", 3: "critical"}
@@ -30,6 +38,7 @@ class Cfg:
     q_stable: float = 0.50
     q_mild: float = 0.80
     q_unstable: float = 0.95
+    max_points_3d: int = 5000
 
 
 def _load_manifest(run_dir: Path) -> dict:
@@ -212,6 +221,12 @@ def pca3(X: np.ndarray) -> np.ndarray:
     return coords
 
 
+def _uniform_subsample_idx(n: int, max_points: int) -> np.ndarray:
+    if max_points <= 0 or n <= max_points:
+        return np.arange(n, dtype=int)
+    return np.linspace(0, n - 1, num=max_points, dtype=int)
+
+
 def plot_timeseries_with_levels(
     out_png: Path,
     t: np.ndarray,
@@ -259,35 +274,66 @@ def plot_timeseries_with_levels(
     plt.close(fig)
 
 
-def plot_embedding_3d(
-    out_png: Path,
+def plot_embedding_3d_html(
+    out_html: Path,
     coords3: np.ndarray,
     lvl: np.ndarray,
+    t: np.ndarray,
+    score: np.ndarray,
+    value: np.ndarray,
+    value_name: str,
     title: str,
+    max_points: int,
 ):
-    fig = plt.figure()
-    ax = fig.add_subplot(111, projection="3d")
-    ax.set_title(title)
-    ax.set_xlabel("PC1")
-    ax.set_ylabel("PC2")
-    ax.set_zlabel("PC3")
+    n = coords3.shape[0]
+    idx = _uniform_subsample_idx(n, max_points)
 
+    coords3 = coords3[idx]
+    lvl = lvl[idx]
+    t = t[idx]
+    score = score[idx]
+    value = value[idx]
+
+    fig = go.Figure()
     for k in range(4):
         m = lvl == k
-        if np.any(m):
-            ax.scatter(
-                coords3[m, 0],
-                coords3[m, 1],
-                coords3[m, 2],
-                s=6,
-                alpha=0.75,
-                color=LEVEL_COLORS[k],
-                label=LEVEL_NAMES[k],
+        if not np.any(m):
+            continue
+
+        customdata = np.stack([t[m], score[m], value[m]], axis=1)
+        fig.add_trace(
+            go.Scatter3d(
+                x=coords3[m, 0],
+                y=coords3[m, 1],
+                z=coords3[m, 2],
+                mode="markers",
+                name=LEVEL_NAMES[k],
+                marker={"size": 3, "color": LEVEL_COLORS[k], "opacity": 0.80},
+                customdata=customdata,
+                hovertemplate=(
+                    "PC1=%{x:.3f}<br>"
+                    "PC2=%{y:.3f}<br>"
+                    "PC3=%{z:.3f}<br>"
+                    "time_s=%{customdata[0]:.3f}<br>"
+                    "score=%{customdata[1]:.6f}<br>"
+                    f"{value_name}=%{{customdata[2]:.6f}}<extra></extra>"
+                ),
             )
-    ax.legend(loc="upper right")
-    fig.tight_layout()
-    fig.savefig(out_png, dpi=170)
-    plt.close(fig)
+        )
+
+    fig.update_layout(
+        title=title,
+        scene={
+            "xaxis_title": "PC1",
+            "yaxis_title": "PC2",
+            "zaxis_title": "PC3",
+        },
+        legend={"orientation": "h", "y": 1.02, "x": 0},
+        margin={"l": 0, "r": 0, "t": 45, "b": 0},
+    )
+
+    out_html.parent.mkdir(parents=True, exist_ok=True)
+    fig.write_html(str(out_html), include_plotlyjs="cdn", full_html=True)
 
 
 def process_run(
@@ -377,18 +423,28 @@ def process_run(
         )
 
     coords3 = pca3(X)
-    plot_embedding_3d(
-        run_out / "incoherence_embedding_3d_global.png",
+    plot_embedding_3d_html(
+        run_out / "incoherence_embedding_3d_global.html",
         coords3,
         lvl_global,
+        time_sub,
+        score,
+        instability_global,
+        "instability_global",
         f"Embedding 3D (PCA) | global | {suffix}",
+        cfg.max_points_3d,
     )
     for v in cfg.variables:
-        plot_embedding_3d(
-            run_out / f"incoherence_embedding_3d_{v}.png",
+        plot_embedding_3d_html(
+            run_out / f"incoherence_embedding_3d_{v}.html",
             coords3,
             levels[v],
+            time_sub,
+            score,
+            contrib[v],
+            f"contrib_{v}",
             f"Embedding 3D (PCA) | {v} | {suffix}",
+            cfg.max_points_3d,
         )
 
     rows = []
@@ -413,6 +469,7 @@ def process_run(
         "variables": list(cfg.variables),
         "knn_k": int(cfg.knn_k),
         "max_eval_points": int(cfg.max_eval_points),
+        "max_points_3d": int(cfg.max_points_3d),
     }
     (run_out / "run_meta.json").write_text(json.dumps(run_meta, indent=2), encoding="utf-8")
 
@@ -429,6 +486,7 @@ def main() -> int:
     ap.add_argument("--knn-k", type=int, default=25)
     ap.add_argument("--ridge", type=float, default=1e-3)
     ap.add_argument("--max-eval-points", type=int, default=300)
+    ap.add_argument("--max-points-3d", type=int, default=5000)
     ap.add_argument("--q-stable", type=float, default=0.50)
     ap.add_argument("--q-mild", type=float, default=0.80)
     ap.add_argument("--q-unstable", type=float, default=0.95)
@@ -469,6 +527,7 @@ def main() -> int:
         q_stable=float(args.q_stable),
         q_mild=float(args.q_mild),
         q_unstable=float(args.q_unstable),
+        max_points_3d=int(args.max_points_3d),
     )
 
     if args.run_id is not None:
