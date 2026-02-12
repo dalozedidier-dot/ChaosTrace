@@ -385,6 +385,7 @@ def plot_embedding_3d_html(
             for a, b, lev in segs:
                 if b <= a:
                     continue
+
                 xs = coords3_s[a : b + 1, 0]
                 ys = coords3_s[a : b + 1, 1]
                 zs = coords3_s[a : b + 1, 2]
@@ -454,7 +455,7 @@ def plot_embedding_3d_html(
     fig.update_layout(
         title=title,
         scene=scene,
-        legend={"orientation": "h", "y": 1.02, "x": 0},
+        legend={"orientation": "h", "y": 1.02, "x": 0, "groupclick": "togglegroup"},
         margin={"l": 0, "r": 0, "t": 45, "b": 0},
     )
 
@@ -753,9 +754,7 @@ def main() -> int:
     pd.DataFrame(index_rows).sort_values("score_mean", ascending=False).to_csv(out_base / "runs_index.csv", index=False)
 
     (out_base / "best_run.txt").write_text(
-        f"best_run_id={best_run_id}
-score_mean={best_score:.6f}
-",
+        f"best_run_id={best_run_id}\nscore_mean={best_score:.6f}\n",
         encoding="utf-8",
     )
 
@@ -767,8 +766,7 @@ score_mean={best_score:.6f}
                 shutil.rmtree(best_dir)
             shutil.copytree(src, best_dir)
             (best_dir / "BEST_FROM.txt").write_text(
-                f"Copie de {src.name}. best_run_id={best_run_id}. score_mean={best_score:.6f}
-",
+                f"Copie de {src.name}. best_run_id={best_run_id}. score_mean={best_score:.6f}\n",
                 encoding="utf-8",
             )
 
