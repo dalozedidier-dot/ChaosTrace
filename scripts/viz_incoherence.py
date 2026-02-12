@@ -43,6 +43,12 @@ class Cfg:
     sphere_surface: bool = False
     time_path: bool = True
     time_path_mode: str = "level"  # "level" or "single"
+    knn_links: bool = False
+    knn_links_k: int = 8
+    knn_links_max_edges: int = 12000
+    knn_links_opacity: float = 0.35
+    knn_links_width: int = 2
+    export_png: bool = False
 
 
 def _load_manifest(run_dir: Path) -> dict:
@@ -274,6 +280,85 @@ def _iter_level_segments(levels: np.ndarray) -> list[tuple[int, int, int]]:
     return segs
 
 
+def _knn_edges(coords3: np.ndarray, k: int, max_edges: int) -> list[tuple[int, int]]:
+    n = coords3.shape[0]
+    if n < 3:
+        return []
+    k = int(np.clip(k, 1, max(1, n - 1)))
+    tree = cKDTree(coords3)
+    _dist, idx = tree.query(coords3, k=k + 1, workers=-1)
+
+    edges: set[tuple[int, int]] = set()
+    for i in range(n):
+        neigh = idx[i, 1:]
+        for j in neigh:
+            a, b = (i, int(j))
+            if a == b:
+                continue
+            if a > b:
+                a, b = b, a
+            edges.add((a, b))
+            if len(edges) >= max_edges:
+                return list(edges)
+    return list(edges)
+
+
+def _add_edges_traces(
+    fig: go.Figure,
+    coords3: np.ndarray,
+    lvl: np.ndarray,
+    edges: list[tuple[int, int]],
+    *,
+    opacity: float,
+    width: int,
+    name_prefix: str,
+):
+    by_level: dict[int, list[tuple[int, int]]] = {0: [], 1: [], 2: [], 3: []}
+    for a, b in edges:
+        lev = int(max(int(lvl[a]), int(lvl[b])))
+        by_level[lev].append((a, b))
+
+    for lev in range(4):
+        eds = by_level[lev]
+        if not eds:
+            continue
+        xs: list[float | None] = []
+        ys: list[float | None] = []
+        zs: list[float | None] = []
+        for a, b in eds:
+            xs.extend([float(coords3[a, 0]), float(coords3[b, 0]), None])
+            ys.extend([float(coords3[a, 1]), float(coords3[b, 1]), None])
+            zs.extend([float(coords3[a, 2]), float(coords3[b, 2]), None])
+
+        fig.add_trace(
+            go.Scatter3d(
+                x=xs,
+                y=ys,
+                z=zs,
+                mode="lines",
+                name=f"{name_prefix}_{LEVEL_NAMES.get(lev, str(lev))}",
+                legendgroup=f"{name_prefix}_{lev}",
+                line={"width": int(width), "color": LEVEL_COLORS.get(lev, "#888888")},
+                opacity=float(opacity),
+                hoverinfo="skip",
+                showlegend=True,
+            )
+        )
+
+
+def _maybe_write_png(fig: go.Figure, out_png: Path, export_png: bool) -> None:
+    if not export_png:
+        return
+    try:
+        # Requires kaleido in the environment.
+        fig.write_image(str(out_png), scale=2)
+    except Exception as exc:
+        raise RuntimeError(
+            "Export PNG Plotly impossible. Installe kaleido (pip install kaleido) "
+            f"ou désactive --export-png. Détail: {exc!r}"
+        ) from exc
+
+
 def plot_timeseries_with_levels(
     out_png: Path,
     t: np.ndarray,
@@ -330,11 +415,18 @@ def plot_embedding_3d_html(
     value: np.ndarray,
     value_name: str,
     title: str,
+    *,
     max_points: int,
     sphere: bool,
     sphere_surface: bool,
     time_path: bool,
     time_path_mode: str,
+    knn_links: bool,
+    knn_links_k: int,
+    knn_links_max_edges: int,
+    knn_links_opacity: float,
+    knn_links_width: int,
+    export_png: bool,
 ):
     n = coords3.shape[0]
     idx = _uniform_subsample_idx(n, max_points)
@@ -351,6 +443,18 @@ def plot_embedding_3d_html(
     fig = go.Figure()
     if sphere and sphere_surface:
         add_sphere_surface(fig, radius=1.0, steps=30)
+
+    if knn_links and coords3_s.shape[0] >= 3:
+        edges = _knn_edges(coords3_s, k=int(knn_links_k), max_edges=int(knn_links_max_edges))
+        _add_edges_traces(
+            fig,
+            coords3_s,
+            lvl_s,
+            edges,
+            opacity=float(knn_links_opacity),
+            width=int(knn_links_width),
+            name_prefix="knn_links",
+        )
 
     if time_path and coords3_s.shape[0] >= 2:
         if time_path_mode not in {"level", "single"}:
@@ -461,6 +565,7 @@ def plot_embedding_3d_html(
 
     out_html.parent.mkdir(parents=True, exist_ok=True)
     fig.write_html(str(out_html), include_plotlyjs="cdn", full_html=True)
+    _maybe_write_png(fig, out_html.with_suffix(".png"), export_png=export_png)
 
 
 def process_run(
@@ -562,11 +667,17 @@ def process_run(
         instability_global,
         "instability_global",
         f"Embedding 3D (PCA) | global | {suffix}",
-        cfg.max_points_3d,
-        False,
-        False,
-        cfg.time_path,
-        cfg.time_path_mode,
+        max_points=cfg.max_points_3d,
+        sphere=False,
+        sphere_surface=False,
+        time_path=cfg.time_path,
+        time_path_mode=cfg.time_path_mode,
+        knn_links=cfg.knn_links,
+        knn_links_k=cfg.knn_links_k,
+        knn_links_max_edges=cfg.knn_links_max_edges,
+        knn_links_opacity=cfg.knn_links_opacity,
+        knn_links_width=cfg.knn_links_width,
+        export_png=cfg.export_png,
     )
     for v in cfg.variables:
         plot_embedding_3d_html(
@@ -578,11 +689,17 @@ def process_run(
             contrib[v],
             f"contrib_{v}",
             f"Embedding 3D (PCA) | {v} | {suffix}",
-            cfg.max_points_3d,
-            False,
-            False,
-            cfg.time_path,
-            cfg.time_path_mode,
+            max_points=cfg.max_points_3d,
+            sphere=False,
+            sphere_surface=False,
+            time_path=cfg.time_path,
+            time_path_mode=cfg.time_path_mode,
+            knn_links=cfg.knn_links,
+            knn_links_k=cfg.knn_links_k,
+            knn_links_max_edges=cfg.knn_links_max_edges,
+            knn_links_opacity=cfg.knn_links_opacity,
+            knn_links_width=cfg.knn_links_width,
+            export_png=cfg.export_png,
         )
 
     if cfg.sphere:
@@ -595,11 +712,17 @@ def process_run(
             instability_global,
             "instability_global",
             f"Embedding 3D (unit sphere) | global | {suffix}",
-            cfg.max_points_3d,
-            True,
-            cfg.sphere_surface,
-            cfg.time_path,
-            cfg.time_path_mode,
+            max_points=cfg.max_points_3d,
+            sphere=True,
+            sphere_surface=cfg.sphere_surface,
+            time_path=cfg.time_path,
+            time_path_mode=cfg.time_path_mode,
+            knn_links=cfg.knn_links,
+            knn_links_k=cfg.knn_links_k,
+            knn_links_max_edges=cfg.knn_links_max_edges,
+            knn_links_opacity=cfg.knn_links_opacity,
+            knn_links_width=cfg.knn_links_width,
+            export_png=cfg.export_png,
         )
         for v in cfg.variables:
             plot_embedding_3d_html(
@@ -611,11 +734,17 @@ def process_run(
                 contrib[v],
                 f"contrib_{v}",
                 f"Embedding 3D (unit sphere) | {v} | {suffix}",
-                cfg.max_points_3d,
-                True,
-                cfg.sphere_surface,
-                cfg.time_path,
-                cfg.time_path_mode,
+                max_points=cfg.max_points_3d,
+                sphere=True,
+                sphere_surface=cfg.sphere_surface,
+                time_path=cfg.time_path,
+                time_path_mode=cfg.time_path_mode,
+                knn_links=cfg.knn_links,
+                knn_links_k=cfg.knn_links_k,
+                knn_links_max_edges=cfg.knn_links_max_edges,
+                knn_links_opacity=cfg.knn_links_opacity,
+                knn_links_width=cfg.knn_links_width,
+                export_png=cfg.export_png,
             )
 
     rows = []
@@ -645,6 +774,10 @@ def process_run(
         "sphere_surface": bool(cfg.sphere_surface),
         "time_path": bool(cfg.time_path),
         "time_path_mode": str(cfg.time_path_mode),
+        "knn_links": bool(cfg.knn_links),
+        "knn_links_k": int(cfg.knn_links_k),
+        "knn_links_max_edges": int(cfg.knn_links_max_edges),
+        "export_png": bool(cfg.export_png),
     }
     (run_out / "run_meta.json").write_text(json.dumps(run_meta, indent=2), encoding="utf-8")
 
@@ -676,6 +809,15 @@ def main() -> int:
         choices=["level", "single"],
         help="Mode du tracé temporel: level (segments colorés) ou single (ligne grise)",
     )
+
+    ap.add_argument("--knn-links", action="store_true", help="Ajoute des liens KNN (graph) dans les vues 3D")
+    ap.add_argument("--knn-links-k", type=int, default=8)
+    ap.add_argument("--knn-links-max-edges", type=int, default=12000)
+    ap.add_argument("--knn-links-opacity", type=float, default=0.35)
+    ap.add_argument("--knn-links-width", type=int, default=2)
+
+    ap.add_argument("--export-png", action="store_true", help="Exporte aussi une image PNG pour chaque figure 3D (kaleido requis)")
+
     ap.add_argument("--q-stable", type=float, default=0.50)
     ap.add_argument("--q-mild", type=float, default=0.80)
     ap.add_argument("--q-unstable", type=float, default=0.95)
@@ -721,6 +863,12 @@ def main() -> int:
         sphere_surface=bool(args.sphere_surface),
         time_path=bool(args.time_path),
         time_path_mode=str(args.time_path_mode),
+        knn_links=bool(args.knn_links),
+        knn_links_k=int(args.knn_links_k),
+        knn_links_max_edges=int(args.knn_links_max_edges),
+        knn_links_opacity=float(args.knn_links_opacity),
+        knn_links_width=int(args.knn_links_width),
+        export_png=bool(args.export_png),
     )
 
     run_ids_to_process = [int(args.run_id)] if args.run_id is not None else run_ids
