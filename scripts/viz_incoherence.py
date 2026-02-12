@@ -39,6 +39,8 @@ class Cfg:
     q_mild: float = 0.80
     q_unstable: float = 0.95
     max_points_3d: int = 5000
+    sphere: bool = False
+    sphere_surface: bool = False
 
 
 def _load_manifest(run_dir: Path) -> dict:
@@ -227,6 +229,34 @@ def _uniform_subsample_idx(n: int, max_points: int) -> np.ndarray:
     return np.linspace(0, n - 1, num=max_points, dtype=int)
 
 
+def to_unit_sphere(coords3: np.ndarray) -> np.ndarray:
+    coords3 = np.asarray(coords3, dtype=float)
+    nrm = np.linalg.norm(coords3, axis=1, keepdims=True)
+    nrm = np.maximum(nrm, 1e-12)
+    return coords3 / nrm
+
+
+def add_sphere_surface(fig: go.Figure, radius: float = 1.0, steps: int = 30) -> None:
+    u = np.linspace(0.0, 2.0 * np.pi, steps)
+    v = np.linspace(0.0, np.pi, steps)
+    uu, vv = np.meshgrid(u, v)
+    x = radius * np.cos(uu) * np.sin(vv)
+    y = radius * np.sin(uu) * np.sin(vv)
+    z = radius * np.cos(vv)
+    fig.add_trace(
+        go.Surface(
+            x=x,
+            y=y,
+            z=z,
+            showscale=False,
+            opacity=0.15,
+            colorscale=[[0, "rgba(180,180,180,0.25)"], [1, "rgba(180,180,180,0.25)"]],
+            hoverinfo="skip",
+            name="sphere",
+        )
+    )
+
+
 def plot_timeseries_with_levels(
     out_png: Path,
     t: np.ndarray,
@@ -284,28 +314,36 @@ def plot_embedding_3d_html(
     value_name: str,
     title: str,
     max_points: int,
+    sphere: bool,
+    sphere_surface: bool,
 ):
     n = coords3.shape[0]
     idx = _uniform_subsample_idx(n, max_points)
 
-    coords3 = coords3[idx]
-    lvl = lvl[idx]
-    t = t[idx]
-    score = score[idx]
-    value = value[idx]
+    coords3_s = coords3[idx]
+    lvl_s = lvl[idx]
+    t_s = t[idx]
+    score_s = score[idx]
+    value_s = value[idx]
+
+    if sphere:
+        coords3_s = to_unit_sphere(coords3_s)
 
     fig = go.Figure()
+    if sphere and sphere_surface:
+        add_sphere_surface(fig, radius=1.0, steps=30)
+
     for k in range(4):
-        m = lvl == k
+        m = lvl_s == k
         if not np.any(m):
             continue
 
-        customdata = np.stack([t[m], score[m], value[m]], axis=1)
+        customdata = np.stack([t_s[m], score_s[m], value_s[m]], axis=1)
         fig.add_trace(
             go.Scatter3d(
-                x=coords3[m, 0],
-                y=coords3[m, 1],
-                z=coords3[m, 2],
+                x=coords3_s[m, 0],
+                y=coords3_s[m, 1],
+                z=coords3_s[m, 2],
                 mode="markers",
                 name=LEVEL_NAMES[k],
                 marker={"size": 3, "color": LEVEL_COLORS[k], "opacity": 0.80},
@@ -321,13 +359,19 @@ def plot_embedding_3d_html(
             )
         )
 
+    scene = {
+        "xaxis_title": "PC1",
+        "yaxis_title": "PC2",
+        "zaxis_title": "PC3",
+    }
+    if sphere:
+        scene["xaxis"] = {"range": [-1.05, 1.05]}
+        scene["yaxis"] = {"range": [-1.05, 1.05]}
+        scene["zaxis"] = {"range": [-1.05, 1.05]}
+
     fig.update_layout(
         title=title,
-        scene={
-            "xaxis_title": "PC1",
-            "yaxis_title": "PC2",
-            "zaxis_title": "PC3",
-        },
+        scene=scene,
         legend={"orientation": "h", "y": 1.02, "x": 0},
         margin={"l": 0, "r": 0, "t": 45, "b": 0},
     )
@@ -339,7 +383,6 @@ def plot_embedding_3d_html(
 def process_run(
     *,
     run_id: int,
-    run_dir: Path,
     out_base: Path,
     input_csv: Path,
     df: pd.DataFrame,
@@ -374,8 +417,8 @@ def process_run(
     instability_global = grad_norm * infl * (1.0 + aniso)
     lvl_global = levels_from_quantiles(instability_global, cfg.q_stable, cfg.q_mild, cfg.q_unstable)
 
-    var_to_cols = {v: [] for v in cfg.variables}
-    for j, (var_name, lag_idx) in enumerate(coord_map):
+    var_to_cols: dict[str, list[int]] = {v: [] for v in cfg.variables}
+    for j, (var_name, _lag_idx) in enumerate(coord_map):
         if var_name in var_to_cols:
             var_to_cols[var_name].append(j)
 
@@ -423,6 +466,8 @@ def process_run(
         )
 
     coords3 = pca3(X)
+
+    # Standard (PCA) views
     plot_embedding_3d_html(
         run_out / "incoherence_embedding_3d_global.html",
         coords3,
@@ -433,6 +478,8 @@ def process_run(
         "instability_global",
         f"Embedding 3D (PCA) | global | {suffix}",
         cfg.max_points_3d,
+        False,
+        False,
     )
     for v in cfg.variables:
         plot_embedding_3d_html(
@@ -445,7 +492,39 @@ def process_run(
             f"contrib_{v}",
             f"Embedding 3D (PCA) | {v} | {suffix}",
             cfg.max_points_3d,
+            False,
+            False,
         )
+
+    # Sphere projection views (optional)
+    if cfg.sphere:
+        plot_embedding_3d_html(
+            run_out / "incoherence_embedding_3d_global_sphere.html",
+            coords3,
+            lvl_global,
+            time_sub,
+            score,
+            instability_global,
+            "instability_global",
+            f"Embedding 3D (unit sphere) | global | {suffix}",
+            cfg.max_points_3d,
+            True,
+            cfg.sphere_surface,
+        )
+        for v in cfg.variables:
+            plot_embedding_3d_html(
+                run_out / f"incoherence_embedding_3d_{v}_sphere.html",
+                coords3,
+                levels[v],
+                time_sub,
+                score,
+                contrib[v],
+                f"contrib_{v}",
+                f"Embedding 3D (unit sphere) | {v} | {suffix}",
+                cfg.max_points_3d,
+                True,
+                cfg.sphere_surface,
+            )
 
     rows = []
     for v in cfg.variables:
@@ -470,6 +549,8 @@ def process_run(
         "knn_k": int(cfg.knn_k),
         "max_eval_points": int(cfg.max_eval_points),
         "max_points_3d": int(cfg.max_points_3d),
+        "sphere": bool(cfg.sphere),
+        "sphere_surface": bool(cfg.sphere_surface),
     }
     (run_out / "run_meta.json").write_text(json.dumps(run_meta, indent=2), encoding="utf-8")
 
@@ -487,6 +568,8 @@ def main() -> int:
     ap.add_argument("--ridge", type=float, default=1e-3)
     ap.add_argument("--max-eval-points", type=int, default=300)
     ap.add_argument("--max-points-3d", type=int, default=5000)
+    ap.add_argument("--sphere", action="store_true", help="Ajoute en plus une projection sur sphère unité")
+    ap.add_argument("--sphere-surface", action="store_true", help="Ajoute la surface de la sphère (si --sphere)")
     ap.add_argument("--q-stable", type=float, default=0.50)
     ap.add_argument("--q-mild", type=float, default=0.80)
     ap.add_argument("--q-unstable", type=float, default=0.95)
@@ -528,19 +611,17 @@ def main() -> int:
         q_mild=float(args.q_mild),
         q_unstable=float(args.q_unstable),
         max_points_3d=int(args.max_points_3d),
+        sphere=bool(args.sphere),
+        sphere_surface=bool(args.sphere_surface),
     )
 
-    if args.run_id is not None:
-        run_ids_to_process = [int(args.run_id)]
-    else:
-        run_ids_to_process = run_ids
+    run_ids_to_process = [int(args.run_id)] if args.run_id is not None else run_ids
 
     index_rows = []
     produced_dirs: dict[int, Path] = {}
     for rid in run_ids_to_process:
         out_dir = process_run(
             run_id=rid,
-            run_dir=run_dir,
             out_base=out_base,
             input_csv=input_csv,
             df=df,
