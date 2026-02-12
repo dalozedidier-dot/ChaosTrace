@@ -1,0 +1,129 @@
+name: incoherence_vectorfield
+
+on:
+  workflow_dispatch:
+    inputs:
+      input_csv:
+        description: "CSV d'entrée"
+        required: false
+        default: "test_data/sample_timeseries_1_2_drops.csv"
+      vars:
+        description: "Variables physiques (colonnes CSV) séparées par des virgules"
+        required: false
+        default: "foil_height_m,boat_speed,wind_shear,wave_height"
+      runs:
+        description: "Nombre de runs sweep"
+        required: false
+        default: "3"
+      seed:
+        description: "Seed RNG"
+        required: false
+        default: "7"
+      knn_k:
+        description: "K voisins pour gradient local"
+        required: false
+        default: "25"
+      max_eval_points:
+        description: "Sous échantillonnage gradient (0 = full)"
+        required: false
+        default: "300"
+      max_points_3d:
+        description: "Max points affichés dans les vues 3D (subsampling uniforme)"
+        required: false
+        default: "5000"
+      time_path:
+        description: "Trajectoire 3D (liens temporels) dans incoherence_viz"
+        required: false
+        default: "false"
+      time_path_mode:
+        description: "Trajectoire 3D: level ou single"
+        required: false
+        default: "level"
+      max_vectors:
+        description: "Nombre max de flèches (cones) pour le champ de vecteurs"
+        required: false
+        default: "800"
+      sphere:
+        description: "Ajouter aussi les versions sphère (unit sphere)"
+        required: false
+        default: "true"
+      sphere_surface:
+        description: "Surface de sphère translucide"
+        required: false
+        default: "true"
+      show_points:
+        description: "Afficher aussi les points en contexte dans les plots cones"
+        required: false
+        default: "true"
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    env:
+      OMP_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      PYTHONHASHSEED: "${{ inputs.seed }}"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: |
+          set -euo pipefail
+          python -m pip install -U pip
+          pip install -e ".[dev]"
+          pip install plotly
+
+      - name: Run sweep
+        run: |
+          set -euo pipefail
+          mkdir -p _ci_out/incoherence_vectorfield
+          python -m chaostrace.cli.run_sweep             --input "${{ inputs.input_csv }}"             --out _ci_out/incoherence_vectorfield             --runs "${{ inputs.runs }}"             --seed "${{ inputs.seed }}"
+
+      - name: Build incoherence viz (produces pc1/pc2/pc3 in incoherence_vectors.csv)
+        run: |
+          set -euo pipefail
+          SPHERE_FLAGS=""
+          if [ "${{ inputs.sphere }}" = "true" ]; then SPHERE_FLAGS="$SPHERE_FLAGS --sphere"; fi
+          if [ "${{ inputs.sphere_surface }}" = "true" ]; then SPHERE_FLAGS="$SPHERE_FLAGS --sphere-surface"; fi
+
+          TP_FLAG="--no-time-path"
+          if [ "${{ inputs.time_path }}" = "true" ]; then TP_FLAG="--time-path"; fi
+
+          python scripts/viz_incoherence.py $SPHERE_FLAGS $TP_FLAG             --time-path-mode "${{ inputs.time_path_mode }}"             --run-dir _ci_out/incoherence_vectorfield             --input "${{ inputs.input_csv }}"             --vars "${{ inputs.vars }}"             --out _ci_out/incoherence_vectorfield/viz_incoherence             --knn-k "${{ inputs.knn_k }}"             --max-eval-points "${{ inputs.max_eval_points }}"             --max-points-3d "${{ inputs.max_points_3d }}"             --copy-best
+
+      - name: Build vector field (cones) per run + per variable
+        run: |
+          set -euo pipefail
+          VF_FLAGS=""
+          if [ "${{ inputs.sphere }}" = "true" ]; then VF_FLAGS="$VF_FLAGS --sphere"; fi
+          if [ "${{ inputs.sphere_surface }}" = "true" ]; then VF_FLAGS="$VF_FLAGS --sphere-surface"; fi
+          if [ "${{ inputs.show_points }}" = "true" ]; then VF_FLAGS="$VF_FLAGS --show-points"; fi
+
+          python scripts/viz_vector_field.py $VF_FLAGS             --viz-dir _ci_out/incoherence_vectorfield/viz_incoherence             --max-vectors "${{ inputs.max_vectors }}"
+
+      - name: Emit manifest
+        if: always()
+        run: |
+          set -euo pipefail
+          cd _ci_out/incoherence_vectorfield
+          FILES=$(find . -type f -maxdepth 8 -print | sed 's|^\./||')
+          cd ../..
+          python scripts/emit_manifest.py             --out-dir _ci_out/incoherence_vectorfield             --files $FILES             --param kind=incoherence_vectorfield             --param tool=viz_vector_field_cones
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: incoherence_vectorfield_run${{ github.run_id }}_a${{ github.run_attempt }}
+          path: _ci_out/incoherence_vectorfield/

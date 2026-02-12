@@ -352,7 +352,6 @@ def plot_embedding_3d_html(
     if sphere and sphere_surface:
         add_sphere_surface(fig, radius=1.0, steps=30)
 
-    # Time-linked trajectory (optional)
     if time_path and coords3_s.shape[0] >= 2:
         if time_path_mode not in {"level", "single"}:
             time_path_mode = "level"
@@ -366,6 +365,7 @@ def plot_embedding_3d_html(
                     z=coords3_s[:, 2],
                     mode="lines",
                     name="time_path",
+                    legendgroup="time_path",
                     line={"width": 2, "color": "rgba(120,120,120,0.55)"},
                     customdata=custom,
                     hovertemplate=(
@@ -376,11 +376,10 @@ def plot_embedding_3d_html(
                         "score=%{customdata[1]:.6f}<br>"
                         f"{value_name}=%{{customdata[2]:.6f}}<extra></extra>"
                     ),
-                    showlegend=False,
+                    showlegend=True,
                 )
             )
         else:
-            # Split into segments with constant level to get a colored trajectory by instability level.
             segs = _iter_level_segments(lvl_s)
             shown_level = {0: False, 1: False, 2: False, 3: False}
             for a, b, lev in segs:
@@ -390,8 +389,11 @@ def plot_embedding_3d_html(
                 ys = coords3_s[a : b + 1, 1]
                 zs = coords3_s[a : b + 1, 2]
                 custom = np.stack([t_s[a : b + 1], score_s[a : b + 1], value_s[a : b + 1]], axis=1)
+
+                lg = f"time_path_{lev}"
                 show_legend = not shown_level.get(lev, False)
                 shown_level[lev] = True
+
                 fig.add_trace(
                     go.Scatter3d(
                         x=xs,
@@ -399,6 +401,7 @@ def plot_embedding_3d_html(
                         z=zs,
                         mode="lines",
                         name=f"time_path_{LEVEL_NAMES.get(lev, str(lev))}",
+                        legendgroup=lg,
                         line={"width": 3, "color": LEVEL_COLORS.get(lev, "#888888")},
                         customdata=custom,
                         hovertemplate=(
@@ -413,7 +416,6 @@ def plot_embedding_3d_html(
                     )
                 )
 
-    # Colored markers by level
     for k in range(4):
         m = lvl_s == k
         if not np.any(m):
@@ -426,6 +428,7 @@ def plot_embedding_3d_html(
                 z=coords3_s[m, 2],
                 mode="markers",
                 name=LEVEL_NAMES[k],
+                legendgroup=f"lvl_{k}",
                 marker={"size": 3, "color": LEVEL_COLORS[k], "opacity": 0.85},
                 customdata=custom,
                 hovertemplate=(
@@ -441,9 +444,12 @@ def plot_embedding_3d_html(
 
     scene = {"xaxis_title": "PC1", "yaxis_title": "PC2", "zaxis_title": "PC3"}
     if sphere:
+        scene["aspectmode"] = "cube"
         scene["xaxis"] = {"range": [-1.05, 1.05]}
         scene["yaxis"] = {"range": [-1.05, 1.05]}
         scene["zaxis"] = {"range": [-1.05, 1.05]}
+    else:
+        scene["aspectmode"] = "data"
 
     fig.update_layout(
         title=title,
@@ -508,8 +514,13 @@ def process_run(
     run_out = out_base / f"run_{run_id}"
     run_out.mkdir(parents=True, exist_ok=True)
 
+    coords3 = pca3(X)
+
     data = {
         "time_s": time_sub,
+        "pc1": coords3[:, 0],
+        "pc2": coords3[:, 1],
+        "pc3": coords3[:, 2],
         "score": score,
         "grad_norm": grad_norm,
         "knn_mean_dist": knn_mean,
@@ -541,9 +552,6 @@ def process_run(
             suffix,
         )
 
-    coords3 = pca3(X)
-
-    # Standard (PCA) views
     plot_embedding_3d_html(
         run_out / "incoherence_embedding_3d_global.html",
         coords3,
@@ -576,7 +584,6 @@ def process_run(
             cfg.time_path_mode,
         )
 
-    # Sphere projection views (optional)
     if cfg.sphere:
         plot_embedding_3d_html(
             run_out / "incoherence_embedding_3d_global_sphere.html",
@@ -656,7 +663,12 @@ def main() -> int:
     ap.add_argument("--max-points-3d", type=int, default=5000)
     ap.add_argument("--sphere", action="store_true", help="Ajoute en plus une projection sur sphère unité")
     ap.add_argument("--sphere-surface", action="store_true", help="Ajoute la surface de la sphère (si --sphere)")
-    ap.add_argument("--time-path", action="store_true", help="Relie les points dans l ordre temporel (3D)")
+    ap.add_argument(
+        "--time-path",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Relie les points dans l ordre temporel (3D). Utilise --no-time-path pour désactiver.",
+    )
     ap.add_argument(
         "--time-path-mode",
         default="level",
@@ -741,7 +753,9 @@ def main() -> int:
     pd.DataFrame(index_rows).sort_values("score_mean", ascending=False).to_csv(out_base / "runs_index.csv", index=False)
 
     (out_base / "best_run.txt").write_text(
-        f"best_run_id={best_run_id}\nscore_mean={best_score:.6f}\n",
+        f"best_run_id={best_run_id}
+score_mean={best_score:.6f}
+",
         encoding="utf-8",
     )
 
@@ -753,7 +767,8 @@ def main() -> int:
                 shutil.rmtree(best_dir)
             shutil.copytree(src, best_dir)
             (best_dir / "BEST_FROM.txt").write_text(
-                f"Copie de {src.name}. best_run_id={best_run_id}. score_mean={best_score:.6f}\n",
+                f"Copie de {src.name}. best_run_id={best_run_id}. score_mean={best_score:.6f}
+",
                 encoding="utf-8",
             )
 
