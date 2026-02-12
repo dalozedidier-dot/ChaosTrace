@@ -1,102 +1,98 @@
-# .github/workflows/incoherence_viz.yml
-name: incoherence_viz
+#!/usr/bin/env python3
+from __future__ import annotations
 
-on:
-  workflow_dispatch:
-    inputs:
-      input_csv:
-        description: "CSV d'entrée"
-        required: false
-        default: "test_data/sample_timeseries_1_2_drops.csv"
-      vars:
-        description: "Variables physiques (colonnes CSV) séparées par des virgules"
-        required: false
-        default: "foil_height_m,boat_speed,wind_shear,wave_height"
-      runs:
-        description: "Nombre de runs sweep"
-        required: false
-        default: "3"
-      seed:
-        description: "Seed RNG"
-        required: false
-        default: "7"
-      knn_k:
-        description: "K voisins pour gradient local"
-        required: false
-        default: "25"
-      max_eval_points:
-        description: "Sous échantillonnage gradient (0 = full)"
-        required: false
-        default: "300"
+import argparse
+import json
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Sequence, Tuple
 
-permissions:
-  contents: read
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+from scipy.spatial import cKDTree
 
-jobs:
-  run:
-    runs-on: ubuntu-latest
-    env:
-      OMP_NUM_THREADS: "1"
-      MKL_NUM_THREADS: "1"
-      PYTHONHASHSEED: "${{ inputs.seed }}"
 
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+LEVEL_NAMES = {0: "stable", 1: "mild", 2: "unstable", 3: "critical"}
+LEVEL_COLORS = {0: "#1b9e77", 1: "#d8b365", 2: "#f46d43", 3: "#d73027"}
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-          cache: pip
 
-      - name: Install
-        run: |
-          set -euo pipefail
-          python -m pip install -U pip
-          pip install -e ".[dev]"
+@dataclass(frozen=True)
+class Cfg:
+    variables: Tuple[str, ...]
+    time_col: str = "time_s"
+    score_col: str = "score_mean"
+    knn_k: int = 25
+    ridge: float = 1e-3
+    max_eval_points: int = 300
+    q_stable: float = 0.50
+    q_mild: float = 0.80
+    q_unstable: float = 0.95
 
-      - name: Run sweep (produit metrics.csv, anomalies.csv, figs)
-        run: |
-          set -euo pipefail
-          mkdir -p _ci_out/incoherence_viz
-          python -m chaostrace.cli.run_sweep \
-            --input "${{ inputs.input_csv }}" \
-            --out _ci_out/incoherence_viz \
-            --runs "${{ inputs.runs }}" \
-            --seed "${{ inputs.seed }}"
 
-      - name: Build incoherence vectors + plots by variable (code couleur)
-        run: |
-          set -euo pipefail
-          python scripts/viz_incoherence.py \
-            --run-dir _ci_out/incoherence_viz \
-            --input "${{ inputs.input_csv }}" \
-            --vars "${{ inputs.vars }}" \
-            --out _ci_out/incoherence_viz/viz_incoherence \
-            --knn-k "${{ inputs.knn_k }}" \
-            --max-eval-points "${{ inputs.max_eval_points }}"
+def _load_manifest(run_dir: Path) -> dict:
+    p = run_dir / "manifest.json"
+    if not p.exists():
+        return {}
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
 
-      - name: Emit manifest (incoherence_viz)
-        if: always()
-        run: |
-          set -euo pipefail
-          python scripts/emit_manifest.py \
-            --out-dir _ci_out/incoherence_viz \
-            --files metrics.csv anomalies.csv manifest.json fig_phase.png fig_timeline.png fig_timeline_inv_var.png \
-                    viz_incoherence/incoherence_vectors.csv \
-                    viz_incoherence/incoherence_summary.csv \
-                    viz_incoherence/incoherence_foil_height_m.png \
-                    viz_incoherence/incoherence_boat_speed.png \
-                    viz_incoherence/incoherence_wind_shear.png \
-                    viz_incoherence/incoherence_wave_height.png \
-            --param kind=incoherence_viz \
-            --param tool=viz_incoherence
-          test -f _ci_out/incoherence_viz/manifest_ci.json
 
-      - name: Upload artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: incoherence_viz_run${{ github.run_id }}_a${{ github.run_attempt }}
-          path: _ci_out/incoherence_viz/
+def _resolve_input_path(run_dir: Path, input_path: str | None) -> Path:
+    if input_path:
+        return Path(input_path)
+    mani = _load_manifest(run_dir)
+    p = mani.get("params", {}).get("input")
+    if not p:
+        raise ValueError("input_path absent et manifest.json ne contient pas params.input")
+    return Path(p)
+
+
+def _takens_1d(x: np.ndarray, dim: int, lag: int) -> np.ndarray:
+    n = len(x) - (dim - 1) * lag
+    if n <= 1:
+        return np.empty((0, dim), dtype=float)
+    emb = np.empty((n, dim), dtype=float)
+    for i in range(dim):
+        emb[:, i] = x[i * lag : i * lag + n]
+    return emb
+
+
+def build_multivariate_embedding(
+    df: pd.DataFrame, variables: Sequence[str], time_col: str, dim: int, lag: int
+) -> tuple[np.ndarray, np.ndarray, list[tuple[str, int]]]:
+    for v in variables:
+        if v not in df.columns:
+            raise ValueError(f"Colonne manquante: {v}")
+
+    t = df[time_col].to_numpy(dtype=float)
+
+    blocks = []
+    coord_map: list[tuple[str, int]] = []
+    n_eff = None
+
+    for v in variables:
+        emb = _takens_1d(df[v].to_numpy(dtype=float), dim=dim, lag=lag)
+        n_eff = emb.shape[0] if n_eff is None else min(n_eff, emb.shape[0])
+        blocks.append(emb)
+        for j in range(dim):
+            coord_map.append((str(v), int(j)))
+
+    if n_eff is None or n_eff <= 1:
+        return np.empty((0, 0), dtype=float), np.asarray([], dtype=float), []
+
+    X = np.concatenate([b[:n_eff] for b in blocks], axis=1)
+    time_sub = t[:n_eff]
+
+    med = np.nanmedian(X, axis=0)
+    q1 = np.nanpercentile(X, 25, axis=0)
+    q3 = np.nanpercentile(X, 75, axis=0)
+    iqr = np.maximum(q3 - q1, 1e-6)
+    X = (X - med) / iqr
+
+    return X, time_sub, coord_map
+
+
+def _ridge_solve(DX: np.ndarra
