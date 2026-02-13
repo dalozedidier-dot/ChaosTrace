@@ -30,7 +30,47 @@ on:
       max_points_3d:
         description: "Max points affichés dans les vues 3D (subsampling uniforme)"
         required: false
-        default: "5000"
+        default: "8000"
+
+      # Séparation incohérence, meilleurs défauts
+      knn_links:
+        description: "Ajouter les liens KNN (graph) dans les vues 3D"
+        required: false
+        default: "true"
+      knn_links_k:
+        description: "KNN: k voisins"
+        required: false
+        default: "10"
+      knn_links_max_edges:
+        description: "KNN: max edges"
+        required: false
+        default: "22000"
+      node_color:
+        description: "Couleur points (main): cluster | dominant_var | level"
+        required: false
+        default: "cluster"
+      edge_color:
+        description: "Couleur liens: level | dominant_var | none"
+        required: false
+        default: "level"
+      edge_filter:
+        description: "Filtre liens: unstable | critical | cross | all"
+        required: false
+        default: "unstable"
+      cluster:
+        description: "Activer clustering sur sous-graphe instable"
+        required: false
+        default: "true"
+      cluster_level_min:
+        description: "Seuil cluster: 2=unstable, 3=critical"
+        required: false
+        default: "2"
+      cluster_min_size:
+        description: "Taille min d un cluster"
+        required: false
+        default: "40"
+
+      # Trajectoire temporelle, optionnelle
       time_path:
         description: "Trajectoire 3D (liens temporels)"
         required: false
@@ -39,60 +79,28 @@ on:
         description: "Trajectoire 3D: level ou single"
         required: false
         default: "level"
-      knn_links:
-        description: "Ajouter des liens KNN (graph) dans les vues 3D"
-        required: false
-        default: "true"
-      knn_links_k:
-        description: "KNN: k voisins"
-        required: false
-        default: "8"
-      knn_links_max_edges:
-        description: "KNN: max edges"
-        required: false
-        default: "12000"
-      node_color:
-        description: "Couleur des points: level | dominant_var | cluster"
-        required: false
-        default: "level"
-      edge_color:
-        description: "Couleur des liens: level | dominant_var | none"
-        required: false
-        default: "level"
-      edge_filter:
-        description: "Filtre des liens: all | unstable | critical | cross"
-        required: false
-        default: "unstable"
-      cluster:
-        description: "Calcul de clusters sur le sous-graphe instable"
-        required: false
-        default: "false"
-      cluster_level_min:
-        description: "Seuil cluster: 2=unstable, 3=critical"
-        required: false
-        default: "2"
-      cluster_min_size:
-        description: "Taille min d un cluster"
-        required: false
-        default: "25"
+
+      # Exports
       export_png:
-        description: "Exporter aussi les PNG Plotly (kaleido)"
+        description: "Exporter aussi des PNG Plotly (kaleido)"
         required: false
         default: "true"
+
+      # Vector field (cones)
       max_vectors:
-        description: "Nombre max de flèches (cones) pour le champ de vecteurs"
+        description: "Nombre max de flèches (cones) champ de vecteurs"
         required: false
-        default: "800"
+        default: "900"
       sphere:
-        description: "Ajouter aussi les versions sphère (unit sphere)"
+        description: "Ajouter aussi les versions unit sphere"
         required: false
         default: "true"
       sphere_surface:
-        description: "Surface de sphère translucide"
+        description: "Surface sphère translucide"
         required: false
         default: "true"
       show_points:
-        description: "Afficher aussi les points en contexte dans les plots cones"
+        description: "Afficher aussi les points de contexte dans le champ de vecteurs"
         required: false
         default: "true"
 
@@ -130,9 +138,10 @@ jobs:
           mkdir -p _ci_out/incoherence_vectorfield
           python -m chaostrace.cli.run_sweep             --input "${{ inputs.input_csv }}"             --out _ci_out/incoherence_vectorfield             --runs "${{ inputs.runs }}"             --seed "${{ inputs.seed }}"
 
-      - name: Build incoherence viz (3D + KNN links + separation)
+      - name: Build incoherence viz (MAIN: séparation par clusters + liens)
         run: |
           set -euo pipefail
+
           SPHERE_FLAGS=""
           if [ "${{ inputs.sphere }}" = "true" ]; then SPHERE_FLAGS="$SPHERE_FLAGS --sphere"; fi
           if [ "${{ inputs.sphere_surface }}" = "true" ]; then SPHERE_FLAGS="$SPHERE_FLAGS --sphere-surface"; fi
@@ -155,6 +164,27 @@ jobs:
 
           python scripts/viz_incoherence.py $SPHERE_FLAGS $TP_FLAG $KNN_FLAG $CL_FLAG $PNG_FLAG             --node-color "${{ inputs.node_color }}"             --edge-color "${{ inputs.edge_color }}"             --edge-filter "${{ inputs.edge_filter }}"             --time-path-mode "${{ inputs.time_path_mode }}"             --run-dir _ci_out/incoherence_vectorfield             --input "${{ inputs.input_csv }}"             --vars "${{ inputs.vars }}"             --out _ci_out/incoherence_vectorfield/viz_incoherence             --knn-k "${{ inputs.knn_k }}"             --max-eval-points "${{ inputs.max_eval_points }}"             --max-points-3d "${{ inputs.max_points_3d }}"             --copy-best
 
+      - name: Build incoherence viz (BONUS: séparation par variable dominante)
+        run: |
+          set -euo pipefail
+
+          SPHERE_FLAGS=""
+          if [ "${{ inputs.sphere }}" = "true" ]; then SPHERE_FLAGS="$SPHERE_FLAGS --sphere"; fi
+          if [ "${{ inputs.sphere_surface }}" = "true" ]; then SPHERE_FLAGS="$SPHERE_FLAGS --sphere-surface"; fi
+
+          TP_FLAG="--no-time-path"
+          if [ "${{ inputs.time_path }}" = "true" ]; then TP_FLAG="--time-path"; fi
+
+          KNN_FLAG=""
+          if [ "${{ inputs.knn_links }}" = "true" ]; then
+            KNN_FLAG="--knn-links --knn-links-k ${{ inputs.knn_links_k }} --knn-links-max-edges ${{ inputs.knn_links_max_edges }}"
+          fi
+
+          PNG_FLAG=""
+          if [ "${{ inputs.export_png }}" = "true" ]; then PNG_FLAG="--export-png"; fi
+
+          python scripts/viz_incoherence.py $SPHERE_FLAGS $TP_FLAG $KNN_FLAG $PNG_FLAG             --node-color "dominant_var"             --edge-color "dominant_var"             --edge-filter "unstable"             --time-path-mode "${{ inputs.time_path_mode }}"             --run-dir _ci_out/incoherence_vectorfield             --input "${{ inputs.input_csv }}"             --vars "${{ inputs.vars }}"             --out _ci_out/incoherence_vectorfield/viz_incoherence_domvar             --knn-k "${{ inputs.knn_k }}"             --max-eval-points "${{ inputs.max_eval_points }}"             --max-points-3d "${{ inputs.max_points_3d }}"
+
       - name: Build vector field (cones) per run + per variable
         run: |
           set -euo pipefail
@@ -170,9 +200,9 @@ jobs:
         run: |
           set -euo pipefail
           cd _ci_out/incoherence_vectorfield
-          FILES=$(find . -type f -maxdepth 10 -print | sed 's|^\./||')
+          FILES=$(find . -type f -maxdepth 12 -print | sed 's|^\./||')
           cd ../..
-          python scripts/emit_manifest.py             --out-dir _ci_out/incoherence_vectorfield             --files $FILES             --param kind=incoherence_vectorfield             --param tool=viz_incoherence_knn_sep
+          python scripts/emit_manifest.py             --out-dir _ci_out/incoherence_vectorfield             --files $FILES             --param kind=incoherence_vectorfield             --param tool=viz_incoherence_best_defaults
 
       - name: Upload artifacts
         if: always()
