@@ -9,6 +9,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
+RUN_HYBRID_BUILD = "hybrid_incoherence_v2fix_2026-02-13"
+
 from chaostrace.features.windowing import estimate_sample_hz
 from chaostrace.hybrid.metrics import event_level_metrics, pointwise_prf
 from chaostrace.orchestrator.sweep import SweepConfig, build_grid, sweep
@@ -589,39 +591,40 @@ def main(argv: Optional[List[str]] = None) -> int:
         )
 
         baseline_mask = (np.arange(len(df)) < baseline_n) & (~is_drop)
-    incoherence = None
-    inco_thresholds: Dict[str, float] = {}
-    inco_weights: Dict[str, float] = {}
-    inco_percentile = float(args.inco_percentile) if args.inco_percentile is not None else float(args.baseline_percentile)
 
-    if bool(args.incoherence):
-        # Build a richer component set than score_mean alone (delta/markov/lyap/RQA/laminar),
-        # then optionally add MP/causal/DL components when enabled.
-        inco_components = _compute_chaos_inco_components(df, cfg=cfg, window_n=win_n)
+        incoherence = None
+        inco_thresholds: Dict[str, float] = {}
+        inco_weights: Dict[str, float] = {}
+        inco_percentile = float(args.inco_percentile) if args.inco_percentile is not None else float(args.baseline_percentile)
 
-        if not bool(args.inco_only_chaos):
-            if score_mp is not None:
-                inco_components["mp"] = np.asarray(score_mp, dtype=float)
-            if score_causal is not None:
-                inco_components["causal"] = np.asarray(score_causal, dtype=float)
-            if score_dl is not None:
-                inco_components["dl"] = np.asarray(score_dl, dtype=float)
+        if bool(args.incoherence):
+            # Build a richer component set than score_mean alone (delta/markov/lyap/RQA/laminar),
+            # then optionally add MP/causal/DL components when enabled.
+            inco_components = _compute_chaos_inco_components(df, cfg=cfg, window_n=win_n)
 
-        user_w: Optional[Dict[str, float]] = None
-        if args.inco_weights is not None:
-            try:
-                w_raw = json.loads(str(args.inco_weights))
-                if isinstance(w_raw, dict):
-                    user_w = {str(k): float(v) for k, v in w_raw.items()}
-            except Exception:
-                user_w = None
+            if not bool(args.inco_only_chaos):
+                if score_mp is not None:
+                    inco_components["mp"] = np.asarray(score_mp, dtype=float)
+                if score_causal is not None:
+                    inco_components["causal"] = np.asarray(score_causal, dtype=float)
+                if score_dl is not None:
+                    inco_components["dl"] = np.asarray(score_dl, dtype=float)
 
-        incoherence, inco_thresholds, inco_weights = _compute_incoherence_series(
-            inco_components,
-            baseline_mask,
-            weights=user_w,
-            percentile=inco_percentile,
-        )
+            user_w: Optional[Dict[str, float]] = None
+            if args.inco_weights is not None:
+                try:
+                    w_raw = json.loads(str(args.inco_weights))
+                    if isinstance(w_raw, dict):
+                        user_w = {str(k): float(v) for k, v in w_raw.items()}
+                except Exception:
+                    user_w = None
+
+            incoherence, inco_thresholds, inco_weights = _compute_incoherence_series(
+                inco_components,
+                baseline_mask,
+                weights=user_w,
+                percentile=inco_percentile,
+            )
 
         thr = _dynamic_threshold(
             fused,
@@ -733,6 +736,34 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
 
     baseline_mask = (np.arange(len(df)) < baseline_n) & (~is_drop)
+    incoherence = None
+    inco_thresholds: Dict[str, float] = {}
+    inco_weights: Dict[str, float] = {}
+    inco_percentile = float(args.inco_percentile) if args.inco_percentile is not None else float(args.baseline_percentile)
+    if bool(args.incoherence):
+        inco_components = _compute_chaos_inco_components(df, cfg=cfg, window_n=win_n)
+        if not bool(args.inco_only_chaos):
+            if score_mp is not None:
+                inco_components["mp"] = np.asarray(score_mp, dtype=float)
+            if score_causal is not None:
+                inco_components["causal"] = np.asarray(score_causal, dtype=float)
+            if score_dl is not None:
+                inco_components["dl"] = np.asarray(score_dl, dtype=float)
+        user_w: Optional[Dict[str, float]] = None
+        if args.inco_weights is not None:
+            try:
+                w_raw = json.loads(str(args.inco_weights))
+                if isinstance(w_raw, dict):
+                    user_w = {str(k): float(v) for k, v in w_raw.items()}
+            except Exception:
+                user_w = None
+        incoherence, inco_thresholds, inco_weights = _compute_incoherence_series(
+            inco_components,
+            baseline_mask,
+            weights=user_w,
+            percentile=inco_percentile,
+        )
+
     thr = _dynamic_threshold(
         fused,
         baseline_mask,
@@ -788,6 +819,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     metrics_out: Dict[str, Any] = {
         "picked_mode": str(pick_mode),
+        "run_hybrid_build": str(RUN_HYBRID_BUILD),
         "picked_run_id": int(picked.run_id),
         "window_s": float(cfg.window_s),
         "window_n": int(win_n),
