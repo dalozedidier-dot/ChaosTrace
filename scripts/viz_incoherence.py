@@ -26,6 +26,26 @@ except Exception as exc:  # pragma: no cover
 LEVEL_NAMES = {0: "stable", 1: "mild", 2: "unstable", 3: "critical"}
 LEVEL_COLORS = {0: "#1b9e77", 1: "#d8b365", 2: "#f46d43", 3: "#d73027"}
 
+# Palette discrète pour variables/clusters (évite d'importer plotly.express)
+QUAL_COLORS = [
+    "#1f77b4",
+    "#ff7f0e",
+    "#2ca02c",
+    "#d62728",
+    "#9467bd",
+    "#8c564b",
+    "#e377c2",
+    "#7f7f7f",
+    "#bcbd22",
+    "#17becf",
+    "#aec7e8",
+    "#ffbb78",
+    "#98df8a",
+    "#ff9896",
+    "#c5b0d5",
+    "#c49c94",
+]
+
 
 @dataclass(frozen=True)
 class Cfg:
@@ -43,11 +63,24 @@ class Cfg:
     sphere_surface: bool = False
     time_path: bool = True
     time_path_mode: str = "level"  # "level" or "single"
+
+    # KNN graph links in 3D views
     knn_links: bool = False
     knn_links_k: int = 8
     knn_links_max_edges: int = 12000
     knn_links_opacity: float = 0.35
     knn_links_width: int = 2
+
+    # Visual encoding
+    node_color: str = "level"  # level | dominant_var | cluster
+    edge_color: str = "level"  # level | dominant_var | none
+    edge_filter: str = "all"   # all | unstable | critical | cross
+
+    # Clustering over KNN links (for separation)
+    cluster: bool = False
+    cluster_level_min: int = 2
+    cluster_min_size: int = 25
+
     export_png: bool = False
 
 
@@ -303,54 +336,89 @@ def _knn_edges(coords3: np.ndarray, k: int, max_edges: int) -> list[tuple[int, i
     return list(edges)
 
 
-def _add_edges_traces(
-    fig: go.Figure,
-    coords3: np.ndarray,
-    lvl: np.ndarray,
-    edges: list[tuple[int, int]],
-    *,
-    opacity: float,
-    width: int,
-    name_prefix: str,
-):
-    by_level: dict[int, list[tuple[int, int]]] = {0: [], 1: [], 2: [], 3: []}
+def _filter_edges(edges: list[tuple[int, int]], lvl: np.ndarray, mode: str) -> list[tuple[int, int]]:
+    mode = str(mode or "all").strip().lower()
+    if mode not in {"all", "unstable", "critical", "cross"}:
+        mode = "all"
+    if mode == "all":
+        return edges
+
+    out: list[tuple[int, int]] = []
     for a, b in edges:
-        lev = int(max(int(lvl[a]), int(lvl[b])))
-        by_level[lev].append((a, b))
+        la = int(lvl[a])
+        lb = int(lvl[b])
+        mx = la if la >= lb else lb
+        if mode == "unstable":
+            if mx >= 2:
+                out.append((a, b))
+        elif mode == "critical":
+            if mx >= 3:
+                out.append((a, b))
+        elif mode == "cross":
+            if (la < 2 and lb >= 2) or (lb < 2 and la >= 2):
+                out.append((a, b))
+    return out
 
-    for lev in range(4):
-        eds = by_level[lev]
-        if not eds:
+
+def _cluster_ids_union_find(
+    n: int,
+    edges: list[tuple[int, int]],
+    mask: np.ndarray,
+    min_size: int,
+) -> np.ndarray:
+    parent = np.arange(n, dtype=int)
+    size = np.ones(n, dtype=int)
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a: int, b: int) -> None:
+        ra = find(a)
+        rb = find(b)
+        if ra == rb:
+            return
+        if size[ra] < size[rb]:
+            ra, rb = rb, ra
+        parent[rb] = ra
+        size[ra] += size[rb]
+
+    for a, b in edges:
+        if mask[a] and mask[b]:
+            union(a, b)
+
+    root_to_id: dict[int, int] = {}
+    cluster = np.full(n, -1, dtype=int)
+    next_id = 0
+
+    # Determine component sizes
+    comp_size: dict[int, int] = {}
+    for i in range(n):
+        if not mask[i]:
             continue
-        xs: list[float | None] = []
-        ys: list[float | None] = []
-        zs: list[float | None] = []
-        for a, b in eds:
-            xs.extend([float(coords3[a, 0]), float(coords3[b, 0]), None])
-            ys.extend([float(coords3[a, 1]), float(coords3[b, 1]), None])
-            zs.extend([float(coords3[a, 2]), float(coords3[b, 2]), None])
+        r = find(i)
+        comp_size[r] = comp_size.get(r, 0) + 1
 
-        fig.add_trace(
-            go.Scatter3d(
-                x=xs,
-                y=ys,
-                z=zs,
-                mode="lines",
-                name=f"{name_prefix}_{LEVEL_NAMES.get(lev, str(lev))}",
-                legendgroup=f"{name_prefix}_{lev}",
-                line={"width": int(width), "color": LEVEL_COLORS.get(lev, "#888888")},
-                opacity=float(opacity),
-                hoverinfo="skip",
-                showlegend=True,
-            )
-        )
+    for i in range(n):
+        if not mask[i]:
+            continue
+        r = find(i)
+        if comp_size.get(r, 0) < int(min_size):
+            continue
+        if r not in root_to_id:
+            root_to_id[r] = next_id
+            next_id += 1
+        cluster[i] = root_to_id[r]
+
+    return cluster
 
 
 def _maybe_write_png(fig: go.Figure, out_png: Path, export_png: bool) -> None:
     if not export_png:
         return
     try:
-        # Requires kaleido in the environment.
         fig.write_image(str(out_png), scale=2)
     except Exception as exc:
         raise RuntimeError(
@@ -406,6 +474,233 @@ def plot_timeseries_with_levels(
     plt.close(fig)
 
 
+def _add_edges_traces_level(
+    fig: go.Figure,
+    coords3: np.ndarray,
+    lvl: np.ndarray,
+    edges: list[tuple[int, int]],
+    *,
+    opacity: float,
+    width: int,
+    name_prefix: str,
+):
+    by_level: dict[int, list[tuple[int, int]]] = {0: [], 1: [], 2: [], 3: []}
+    for a, b in edges:
+        lev = int(max(int(lvl[a]), int(lvl[b])))
+        by_level[lev].append((a, b))
+
+    for lev in range(4):
+        eds = by_level[lev]
+        if not eds:
+            continue
+        xs: list[float | None] = []
+        ys: list[float | None] = []
+        zs: list[float | None] = []
+        for a, b in eds:
+            xs.extend([float(coords3[a, 0]), float(coords3[b, 0]), None])
+            ys.extend([float(coords3[a, 1]), float(coords3[b, 1]), None])
+            zs.extend([float(coords3[a, 2]), float(coords3[b, 2]), None])
+
+        fig.add_trace(
+            go.Scatter3d(
+                x=xs,
+                y=ys,
+                z=zs,
+                mode="lines",
+                name=f"{name_prefix}_{LEVEL_NAMES.get(lev, str(lev))}",
+                legendgroup=f"{name_prefix}_{lev}",
+                line={"width": int(width), "color": LEVEL_COLORS.get(lev, "#888888")},
+                opacity=float(opacity),
+                hoverinfo="skip",
+                showlegend=True,
+            )
+        )
+
+
+def _add_edges_traces_domvar(
+    fig: go.Figure,
+    coords3: np.ndarray,
+    dom_var: np.ndarray,
+    edges: list[tuple[int, int]],
+    *,
+    opacity: float,
+    width: int,
+    name_prefix: str,
+    var_colors: dict[str, str],
+):
+    by_key: dict[str, list[tuple[int, int]]] = {}
+    for a, b in edges:
+        va = str(dom_var[a])
+        vb = str(dom_var[b])
+        key = va if va == vb else "mixed"
+        by_key.setdefault(key, []).append((a, b))
+
+    keys = sorted(by_key.keys(), key=lambda x: (x == "mixed", x))
+    for key in keys:
+        eds = by_key[key]
+        if not eds:
+            continue
+        xs: list[float | None] = []
+        ys: list[float | None] = []
+        zs: list[float | None] = []
+        for a, b in eds:
+            xs.extend([float(coords3[a, 0]), float(coords3[b, 0]), None])
+            ys.extend([float(coords3[a, 1]), float(coords3[b, 1]), None])
+            zs.extend([float(coords3[a, 2]), float(coords3[b, 2]), None])
+
+        color = var_colors.get(key, "#9e9e9e")
+        fig.add_trace(
+            go.Scatter3d(
+                x=xs,
+                y=ys,
+                z=zs,
+                mode="lines",
+                name=f"{name_prefix}_{key}",
+                legendgroup=f"{name_prefix}_{key}",
+                line={"width": int(width), "color": color},
+                opacity=float(opacity),
+                hoverinfo="skip",
+                showlegend=True,
+            )
+        )
+
+
+def _add_nodes_level(fig: go.Figure, coords3: np.ndarray, lvl: np.ndarray, t: np.ndarray, score: np.ndarray, value: np.ndarray, value_name: str):
+    for k in range(4):
+        m = lvl == k
+        if not np.any(m):
+            continue
+        custom = np.stack([t[m], score[m], value[m]], axis=1)
+        fig.add_trace(
+            go.Scatter3d(
+                x=coords3[m, 0],
+                y=coords3[m, 1],
+                z=coords3[m, 2],
+                mode="markers",
+                name=LEVEL_NAMES[k],
+                legendgroup=f"lvl_{k}",
+                marker={"size": 3, "color": LEVEL_COLORS[k], "opacity": 0.85},
+                customdata=custom,
+                hovertemplate=(
+                    "x=%{x:.3f}<br>"
+                    "y=%{y:.3f}<br>"
+                    "z=%{z:.3f}<br>"
+                    "time_s=%{customdata[0]:.3f}<br>"
+                    "score=%{customdata[1]:.6f}<br>"
+                    f"{value_name}=%{{customdata[2]:.6f}}<extra></extra>"
+                ),
+            )
+        )
+
+
+def _add_nodes_domvar(
+    fig: go.Figure,
+    coords3: np.ndarray,
+    dom_var: np.ndarray,
+    lvl: np.ndarray,
+    t: np.ndarray,
+    score: np.ndarray,
+    value: np.ndarray,
+    value_name: str,
+    var_colors: dict[str, str],
+):
+    uniq = sorted(set(str(x) for x in dom_var))
+    for var in uniq:
+        m = np.asarray(dom_var == var)
+        if not np.any(m):
+            continue
+        # taille en fonction du niveau (séparation visuelle)
+        size = 2.2 + 1.1 * lvl[m].astype(float)
+        custom = np.stack([t[m], score[m], value[m], lvl[m]], axis=1)
+        fig.add_trace(
+            go.Scatter3d(
+                x=coords3[m, 0],
+                y=coords3[m, 1],
+                z=coords3[m, 2],
+                mode="markers",
+                name=f"dom_var:{var}",
+                legendgroup=f"dom_{var}",
+                marker={"size": size, "color": var_colors.get(var, "#9e9e9e"), "opacity": 0.85},
+                customdata=custom,
+                hovertemplate=(
+                    "x=%{x:.3f}<br>"
+                    "y=%{y:.3f}<br>"
+                    "z=%{z:.3f}<br>"
+                    "time_s=%{customdata[0]:.3f}<br>"
+                    "score=%{customdata[1]:.6f}<br>"
+                    f"{value_name}=%{{customdata[2]:.6f}}<br>"
+                    "level=%{customdata[3]}<extra></extra>"
+                ),
+            )
+        )
+
+
+def _add_nodes_cluster(
+    fig: go.Figure,
+    coords3: np.ndarray,
+    cluster: np.ndarray,
+    lvl: np.ndarray,
+    t: np.ndarray,
+    score: np.ndarray,
+    value: np.ndarray,
+    value_name: str,
+):
+    cl = np.asarray(cluster, dtype=int)
+    uniq = sorted(set(int(x) for x in cl if int(x) >= 0))
+    # nodes not clustered
+    m0 = cl < 0
+    if np.any(m0):
+        size0 = 2.0 + 1.0 * lvl[m0].astype(float)
+        custom0 = np.stack([t[m0], score[m0], value[m0], lvl[m0]], axis=1)
+        fig.add_trace(
+            go.Scatter3d(
+                x=coords3[m0, 0],
+                y=coords3[m0, 1],
+                z=coords3[m0, 2],
+                mode="markers",
+                name="cluster:none",
+                legendgroup="cluster_none",
+                marker={"size": size0, "color": "#6e6e6e", "opacity": 0.50},
+                customdata=custom0,
+                hovertemplate=(
+                    "x=%{x:.3f}<br>y=%{y:.3f}<br>z=%{z:.3f}<br>"
+                    "time_s=%{customdata[0]:.3f}<br>"
+                    "score=%{customdata[1]:.6f}<br>"
+                    f"{value_name}=%{{customdata[2]:.6f}}<br>"
+                    "level=%{customdata[3]}<extra></extra>"
+                ),
+            )
+        )
+
+    for i, cid in enumerate(uniq):
+        m = cl == cid
+        if not np.any(m):
+            continue
+        color = QUAL_COLORS[i % len(QUAL_COLORS)]
+        size = 2.4 + 1.2 * lvl[m].astype(float)
+        custom = np.stack([t[m], score[m], value[m], lvl[m], cl[m]], axis=1)
+        fig.add_trace(
+            go.Scatter3d(
+                x=coords3[m, 0],
+                y=coords3[m, 1],
+                z=coords3[m, 2],
+                mode="markers",
+                name=f"cluster:{cid}",
+                legendgroup=f"cluster_{cid}",
+                marker={"size": size, "color": color, "opacity": 0.90},
+                customdata=custom,
+                hovertemplate=(
+                    "x=%{x:.3f}<br>y=%{y:.3f}<br>z=%{z:.3f}<br>"
+                    "time_s=%{customdata[0]:.3f}<br>"
+                    "score=%{customdata[1]:.6f}<br>"
+                    f"{value_name}=%{{customdata[2]:.6f}}<br>"
+                    "level=%{customdata[3]}<br>"
+                    "cluster=%{customdata[4]}<extra></extra>"
+                ),
+            )
+        )
+
+
 def plot_embedding_3d_html(
     out_html: Path,
     coords3: np.ndarray,
@@ -426,6 +721,12 @@ def plot_embedding_3d_html(
     knn_links_max_edges: int,
     knn_links_opacity: float,
     knn_links_width: int,
+    node_color: str,
+    edge_color: str,
+    edge_filter: str,
+    dom_var: np.ndarray,
+    cluster_id: np.ndarray | None,
+    cluster_enabled: bool,
     export_png: bool,
 ):
     n = coords3.shape[0]
@@ -436,26 +737,52 @@ def plot_embedding_3d_html(
     t_s = t[idx]
     score_s = score[idx]
     value_s = value[idx]
+    dom_s = dom_var[idx]
+    cl_s = cluster_id[idx] if cluster_id is not None else None
 
     if sphere:
         coords3_s = to_unit_sphere(coords3_s)
+
+    # var -> color mapping (stable across plots)
+    vars_unique = sorted(set(str(x) for x in dom_s))
+    var_colors: dict[str, str] = {v: QUAL_COLORS[i % len(QUAL_COLORS)] for i, v in enumerate(vars_unique)}
+    var_colors["mixed"] = "#9e9e9e"
 
     fig = go.Figure()
     if sphere and sphere_surface:
         add_sphere_surface(fig, radius=1.0, steps=30)
 
+    edges: list[tuple[int, int]] = []
     if knn_links and coords3_s.shape[0] >= 3:
         edges = _knn_edges(coords3_s, k=int(knn_links_k), max_edges=int(knn_links_max_edges))
-        _add_edges_traces(
-            fig,
-            coords3_s,
-            lvl_s,
-            edges,
-            opacity=float(knn_links_opacity),
-            width=int(knn_links_width),
-            name_prefix="knn_links",
-        )
+        edges = _filter_edges(edges, lvl_s, mode=edge_filter)
 
+        ec = str(edge_color or "level").lower()
+        if ec == "none":
+            pass
+        elif ec == "dominant_var":
+            _add_edges_traces_domvar(
+                fig,
+                coords3_s,
+                dom_s,
+                edges,
+                opacity=float(knn_links_opacity),
+                width=int(knn_links_width),
+                name_prefix="knn_links",
+                var_colors=var_colors,
+            )
+        else:
+            _add_edges_traces_level(
+                fig,
+                coords3_s,
+                lvl_s,
+                edges,
+                opacity=float(knn_links_opacity),
+                width=int(knn_links_width),
+                name_prefix="knn_links",
+            )
+
+    # Optional time path (order is chronological; useful for drift)
     if time_path and coords3_s.shape[0] >= 2:
         if time_path_mode not in {"level", "single"}:
             time_path_mode = "level"
@@ -473,9 +800,9 @@ def plot_embedding_3d_html(
                     line={"width": 2, "color": "rgba(120,120,120,0.55)"},
                     customdata=custom,
                     hovertemplate=(
-                        "PC1=%{x:.3f}<br>"
-                        "PC2=%{y:.3f}<br>"
-                        "PC3=%{z:.3f}<br>"
+                        "x=%{x:.3f}<br>"
+                        "y=%{y:.3f}<br>"
+                        "z=%{z:.3f}<br>"
                         "time_s=%{customdata[0]:.3f}<br>"
                         "score=%{customdata[1]:.6f}<br>"
                         f"{value_name}=%{{customdata[2]:.6f}}<extra></extra>"
@@ -489,7 +816,6 @@ def plot_embedding_3d_html(
             for a, b, lev in segs:
                 if b <= a:
                     continue
-
                 xs = coords3_s[a : b + 1, 0]
                 ys = coords3_s[a : b + 1, 1]
                 zs = coords3_s[a : b + 1, 2]
@@ -510,9 +836,9 @@ def plot_embedding_3d_html(
                         line={"width": 3, "color": LEVEL_COLORS.get(lev, "#888888")},
                         customdata=custom,
                         hovertemplate=(
-                            "PC1=%{x:.3f}<br>"
-                            "PC2=%{y:.3f}<br>"
-                            "PC3=%{z:.3f}<br>"
+                            "x=%{x:.3f}<br>"
+                            "y=%{y:.3f}<br>"
+                            "z=%{z:.3f}<br>"
                             "time_s=%{customdata[0]:.3f}<br>"
                             "score=%{customdata[1]:.6f}<br>"
                             f"{value_name}=%{{customdata[2]:.6f}}<extra></extra>"
@@ -521,31 +847,14 @@ def plot_embedding_3d_html(
                     )
                 )
 
-    for k in range(4):
-        m = lvl_s == k
-        if not np.any(m):
-            continue
-        custom = np.stack([t_s[m], score_s[m], value_s[m]], axis=1)
-        fig.add_trace(
-            go.Scatter3d(
-                x=coords3_s[m, 0],
-                y=coords3_s[m, 1],
-                z=coords3_s[m, 2],
-                mode="markers",
-                name=LEVEL_NAMES[k],
-                legendgroup=f"lvl_{k}",
-                marker={"size": 3, "color": LEVEL_COLORS[k], "opacity": 0.85},
-                customdata=custom,
-                hovertemplate=(
-                    "PC1=%{x:.3f}<br>"
-                    "PC2=%{y:.3f}<br>"
-                    "PC3=%{z:.3f}<br>"
-                    "time_s=%{customdata[0]:.3f}<br>"
-                    "score=%{customdata[1]:.6f}<br>"
-                    f"{value_name}=%{{customdata[2]:.6f}}<extra></extra>"
-                ),
-            )
-        )
+    # Nodes
+    nc = str(node_color or "level").lower()
+    if nc == "dominant_var":
+        _add_nodes_domvar(fig, coords3_s, dom_s, lvl_s, t_s, score_s, value_s, value_name, var_colors)
+    elif nc == "cluster" and cluster_enabled and cl_s is not None:
+        _add_nodes_cluster(fig, coords3_s, cl_s, lvl_s, t_s, score_s, value_s, value_name)
+    else:
+        _add_nodes_level(fig, coords3_s, lvl_s, t_s, score_s, value_s, value_name)
 
     scene = {"xaxis_title": "PC1", "yaxis_title": "PC2", "zaxis_title": "PC3"}
     if sphere:
@@ -617,11 +926,26 @@ def process_run(
         contrib[v] = (np.sum(np.abs(G[:, cols]), axis=1) if cols else np.zeros(X.shape[0])) * infl
         levels[v] = levels_from_quantiles(contrib[v], cfg.q_stable, cfg.q_mild, cfg.q_unstable)
 
+    # dominant variable per point
+    contrib_stack = np.stack([contrib[v] for v in cfg.variables], axis=1) if cfg.variables else np.zeros((X.shape[0], 1))
+    dom_idx = np.argmax(contrib_stack, axis=1)
+    dom_var = np.asarray([cfg.variables[int(i)] for i in dom_idx], dtype=object)
+
     run_out = out_base / f"run_{run_id}"
     run_out.mkdir(parents=True, exist_ok=True)
 
     coords3 = pca3(X)
 
+    # clusters computed on PCA coords (full), using KNN edges (before subsampling)
+    cluster_id = None
+    if cfg.cluster and cfg.knn_links:
+        edges_full = _knn_edges(coords3, k=int(cfg.knn_links_k), max_edges=int(cfg.knn_links_max_edges))
+        mask = lvl_global >= int(cfg.cluster_level_min)
+        cluster_id = _cluster_ids_union_find(coords3.shape[0], edges_full, mask=mask, min_size=int(cfg.cluster_min_size))
+    else:
+        cluster_id = np.full(coords3.shape[0], -1, dtype=int)
+
+    # save per-point dataframe
     data = {
         "time_s": time_sub,
         "pc1": coords3[:, 0],
@@ -634,6 +958,8 @@ def process_run(
         "anisotropy": aniso,
         "instability_global": instability_global,
         "level_global": lvl_global,
+        "dom_var": dom_var,
+        "cluster_id": cluster_id,
     }
     for v in cfg.variables:
         data[f"contrib_{v}"] = contrib[v]
@@ -658,6 +984,7 @@ def process_run(
             suffix,
         )
 
+    # 3D views: global + per var (PCA), plus unit sphere variants if enabled
     plot_embedding_3d_html(
         run_out / "incoherence_embedding_3d_global.html",
         coords3,
@@ -677,6 +1004,12 @@ def process_run(
         knn_links_max_edges=cfg.knn_links_max_edges,
         knn_links_opacity=cfg.knn_links_opacity,
         knn_links_width=cfg.knn_links_width,
+        node_color=cfg.node_color,
+        edge_color=cfg.edge_color,
+        edge_filter=cfg.edge_filter,
+        dom_var=dom_var,
+        cluster_id=cluster_id,
+        cluster_enabled=cfg.cluster,
         export_png=cfg.export_png,
     )
     for v in cfg.variables:
@@ -699,6 +1032,12 @@ def process_run(
             knn_links_max_edges=cfg.knn_links_max_edges,
             knn_links_opacity=cfg.knn_links_opacity,
             knn_links_width=cfg.knn_links_width,
+            node_color=cfg.node_color,
+            edge_color=cfg.edge_color,
+            edge_filter=cfg.edge_filter,
+            dom_var=dom_var,
+            cluster_id=cluster_id,
+            cluster_enabled=cfg.cluster,
             export_png=cfg.export_png,
         )
 
@@ -722,6 +1061,12 @@ def process_run(
             knn_links_max_edges=cfg.knn_links_max_edges,
             knn_links_opacity=cfg.knn_links_opacity,
             knn_links_width=cfg.knn_links_width,
+            node_color=cfg.node_color,
+            edge_color=cfg.edge_color,
+            edge_filter=cfg.edge_filter,
+            dom_var=dom_var,
+            cluster_id=cluster_id,
+            cluster_enabled=cfg.cluster,
             export_png=cfg.export_png,
         )
         for v in cfg.variables:
@@ -744,9 +1089,16 @@ def process_run(
                 knn_links_max_edges=cfg.knn_links_max_edges,
                 knn_links_opacity=cfg.knn_links_opacity,
                 knn_links_width=cfg.knn_links_width,
+                node_color=cfg.node_color,
+                edge_color=cfg.edge_color,
+                edge_filter=cfg.edge_filter,
+                dom_var=dom_var,
+                cluster_id=cluster_id,
+                cluster_enabled=cfg.cluster,
                 export_png=cfg.export_png,
             )
 
+    # summary
     rows = []
     for v in cfg.variables:
         x = contrib[v]
@@ -777,6 +1129,12 @@ def process_run(
         "knn_links": bool(cfg.knn_links),
         "knn_links_k": int(cfg.knn_links_k),
         "knn_links_max_edges": int(cfg.knn_links_max_edges),
+        "node_color": str(cfg.node_color),
+        "edge_color": str(cfg.edge_color),
+        "edge_filter": str(cfg.edge_filter),
+        "cluster": bool(cfg.cluster),
+        "cluster_level_min": int(cfg.cluster_level_min),
+        "cluster_min_size": int(cfg.cluster_min_size),
         "export_png": bool(cfg.export_png),
     }
     (run_out / "run_meta.json").write_text(json.dumps(run_meta, indent=2), encoding="utf-8")
@@ -815,6 +1173,14 @@ def main() -> int:
     ap.add_argument("--knn-links-max-edges", type=int, default=12000)
     ap.add_argument("--knn-links-opacity", type=float, default=0.35)
     ap.add_argument("--knn-links-width", type=int, default=2)
+
+    ap.add_argument("--node-color", default="level", choices=["level", "dominant_var", "cluster"])
+    ap.add_argument("--edge-color", default="level", choices=["level", "dominant_var", "none"])
+    ap.add_argument("--edge-filter", default="all", choices=["all", "unstable", "critical", "cross"])
+
+    ap.add_argument("--cluster", action="store_true", help="Calcule des clusters (composantes connexes) sur le sous-graphe instable")
+    ap.add_argument("--cluster-level-min", type=int, default=2, help="Seuil niveau pour participer au clustering (2=unstable,3=critical)")
+    ap.add_argument("--cluster-min-size", type=int, default=25, help="Taille min pour garder un cluster (sinon cluster:none)")
 
     ap.add_argument("--export-png", action="store_true", help="Exporte aussi une image PNG pour chaque figure 3D (kaleido requis)")
 
@@ -868,6 +1234,12 @@ def main() -> int:
         knn_links_max_edges=int(args.knn_links_max_edges),
         knn_links_opacity=float(args.knn_links_opacity),
         knn_links_width=int(args.knn_links_width),
+        node_color=str(args.node_color),
+        edge_color=str(args.edge_color),
+        edge_filter=str(args.edge_filter),
+        cluster=bool(args.cluster),
+        cluster_level_min=int(args.cluster_level_min),
+        cluster_min_size=int(args.cluster_min_size),
         export_png=bool(args.export_png),
     )
 
