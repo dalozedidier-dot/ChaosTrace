@@ -185,6 +185,9 @@ def build_cone_vectorfield(
     else:
         scene["aspectmode"] = "data"
 
+    # Rotation "sur axe" (turntable)
+    scene["dragmode"] = "turntable"
+
     fig.update_layout(
         title=title,
         scene=scene,
@@ -193,7 +196,7 @@ def build_cone_vectorfield(
     )
 
     out_html.parent.mkdir(parents=True, exist_ok=True)
-    fig.write_html(str(out_html), include_plotlyjs="inline", full_html=True)
+    fig.write_html(str(out_html), include_plotlyjs="directory", full_html=True, config={"scrollZoom": True})
 
 
 def main() -> int:

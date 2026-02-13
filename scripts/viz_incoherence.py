@@ -865,6 +865,9 @@ def plot_embedding_3d_html(
     else:
         scene["aspectmode"] = "data"
 
+    # Rotation "sur axe" (turntable)
+    scene["dragmode"] = "turntable"
+
     fig.update_layout(
         title=title,
         scene=scene,
@@ -873,7 +876,7 @@ def plot_embedding_3d_html(
     )
 
     out_html.parent.mkdir(parents=True, exist_ok=True)
-    fig.write_html(str(out_html), include_plotlyjs="inline", full_html=True)
+    fig.write_html(str(out_html), include_plotlyjs="directory", full_html=True, config={"scrollZoom": True})
     _maybe_write_png(fig, out_html.with_suffix(".png"), export_png=export_png)
 
 
