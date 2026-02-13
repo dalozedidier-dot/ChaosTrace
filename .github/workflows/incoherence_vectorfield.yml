@@ -1,6 +1,6 @@
 name: incoherence_vectorfield
 
-on:
+"on":
   workflow_dispatch:
     inputs:
       input_csv:
@@ -33,7 +33,7 @@ on:
         default: "8000"
 
       knn_links:
-        description: "Ajouter les liens KNN (graph) dans les vues 3D"
+        description: "Liens KNN dans les vues 3D"
         required: false
         default: "true"
       knn_links_k:
@@ -46,7 +46,7 @@ on:
         default: "22000"
 
       node_color:
-        description: "Couleur points (main): cluster | dominant_var | level"
+        description: "Couleur points: cluster | dominant_var | level"
         required: false
         default: "cluster"
       edge_color:
@@ -59,7 +59,7 @@ on:
         default: "unstable"
 
       cluster:
-        description: "Activer clustering sur sous-graphe instable"
+        description: "Clustering sur sous-graphe instable"
         required: false
         default: "true"
       cluster_level_min:
@@ -67,7 +67,7 @@ on:
         required: false
         default: "2"
       cluster_min_size:
-        description: "Taille min d un cluster"
+        description: "Taille min d'un cluster"
         required: false
         default: "40"
 
@@ -102,6 +102,12 @@ on:
         required: false
         default: "true"
 
+  push:
+    paths:
+      - ".github/workflows/incoherence_vectorfield.yml"
+      - "scripts/viz_incoherence.py"
+      - "scripts/viz_vector_field.py"
+
 permissions:
   contents: read
 
@@ -111,7 +117,7 @@ jobs:
     env:
       OMP_NUM_THREADS: "1"
       MKL_NUM_THREADS: "1"
-      PYTHONHASHSEED: "${{ inputs.seed }}"
+      PYTHONHASHSEED: "${{ inputs.seed || '7' }}"
 
     steps:
       - name: Checkout
@@ -121,7 +127,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-          cache: pip
+          cache: "pip"
 
       - name: Install
         run: |
@@ -134,32 +140,51 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p _ci_out/incoherence_vectorfield
-          python -m chaostrace.cli.run_sweep \
-            --input "${{ inputs.input_csv }}" \
-            --out _ci_out/incoherence_vectorfield \
-            --runs "${{ inputs.runs }}" \
-            --seed "${{ inputs.seed }}"
+          python -m chaostrace.cli.run_sweep             --input "${{ inputs.input_csv || 'test_data/sample_timeseries_1_2_drops.csv' }}"             --out _ci_out/incoherence_vectorfield             --runs "${{ inputs.runs || '3' }}"             --seed "${{ inputs.seed || '7' }}"
 
-      - name: Build incoherence viz (MAIN: séparation par clusters + liens)
+      - name: Build incoherence viz (clusters + liens)
         run: |
           set -euo pipefail
 
+          INPUT_CSV="${{ inputs.input_csv || 'test_data/sample_timeseries_1_2_drops.csv' }}"
+          VARS="${{ inputs.vars || 'foil_height_m,boat_speed,wind_shear,wave_height' }}"
+
           SPHERE_FLAGS=""
-          if [ "${{ inputs.sphere }}" = "true" ]; then SPHERE_FLAGS="$SPHERE_FLAGS --sphere"; fi
-          if [ "${{ inputs.sphere_surface }}" = "true" ]; then SPHERE_FLAGS="$SPHERE_FLAGS --sphere-surface"; fi
+          if [ "${{ inputs.sphere || 'true' }}" = "true" ]; then SPHERE_FLAGS="$SPHERE_FLAGS --sphere"; fi
+          if [ "${{ inputs.sphere_surface || 'true' }}" = "true" ]; then SPHERE_FLAGS="$SPHERE_FLAGS --sphere-surface"; fi
 
           TP_FLAG="--no-time-path"
-          if [ "${{ inputs.time_path }}" = "true" ]; then TP_FLAG="--time-path"; fi
+          if [ "${{ inputs.time_path || 'false' }}" = "true" ]; then TP_FLAG="--time-path"; fi
 
           KNN_FLAG=""
-          if [ "${{ inputs.knn_links }}" = "true" ]; then
-            KNN_FLAG="--knn-links --knn-links-k ${{ inputs.knn_links_k }} --knn-links-max-edges ${{ inputs.knn_links_max_edges }}"
+          if [ "${{ inputs.knn_links || 'true' }}" = "true" ]; then
+            KNN_FLAG="--knn-links --knn-links-k ${{ inputs.knn_links_k || '10' }} --knn-links-max-edges ${{ inputs.knn_links_max_edges || '22000' }}"
           fi
 
           CL_FLAG=""
-          if [ "${{ inputs.cluster }}" = "true" ]; then
-            CL_FLAG="--cluster --cluster-level-min ${{ inputs.cluster_level_min }} --cluster-min-size ${{ inputs.cluster_min_size }}"
+          if [ "${{ inputs.cluster || 'true' }}" = "true" ]; then
+            CL_FLAG="--cluster --cluster-level-min ${{ inputs.cluster_level_min || '2' }} --cluster-min-size ${{ inputs.cluster_min_size || '40' }}"
           fi
 
           PNG_FLAG=""
-          if [ "${{ inputs.export_png_]()
+          if [ "${{ inputs.export_png || 'true' }}" = "true" ]; then PNG_FLAG="--export-png"; fi
+
+          python scripts/viz_incoherence.py $SPHERE_FLAGS $TP_FLAG $KNN_FLAG $CL_FLAG $PNG_FLAG             --node-color "${{ inputs.node_color || 'cluster' }}"             --edge-color "${{ inputs.edge_color || 'level' }}"             --edge-filter "${{ inputs.edge_filter || 'unstable' }}"             --time-path-mode "${{ inputs.time_path_mode || 'level' }}"             --run-dir _ci_out/incoherence_vectorfield             --input "$INPUT_CSV"             --vars "$VARS"             --out _ci_out/incoherence_vectorfield/viz_incoherence             --knn-k "${{ inputs.knn_k || '25' }}"             --max-eval-points "${{ inputs.max_eval_points || '300' }}"             --max-points-3d "${{ inputs.max_points_3d || '8000' }}"             --copy-best
+
+      - name: Build vector field (cones)
+        run: |
+          set -euo pipefail
+
+          VF_FLAGS=""
+          if [ "${{ inputs.sphere || 'true' }}" = "true" ]; then VF_FLAGS="$VF_FLAGS --sphere"; fi
+          if [ "${{ inputs.sphere_surface || 'true' }}" = "true" ]; then VF_FLAGS="$VF_FLAGS --sphere-surface"; fi
+          if [ "${{ inputs.show_points || 'true' }}" = "true" ]; then VF_FLAGS="$VF_FLAGS --show-points"; fi
+
+          python scripts/viz_vector_field.py $VF_FLAGS             --viz-dir _ci_out/incoherence_vectorfield/viz_incoherence             --max-vectors "${{ inputs.max_vectors || '900' }}"
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: incoherence_vectorfield_run${{ github.run_id }}_a${{ github.run_attempt }}
+          path: _ci_out/incoherence_vectorfield/
