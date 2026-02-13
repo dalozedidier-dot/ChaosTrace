@@ -9,11 +9,13 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-RUN_HYBRID_BUILD = "hybrid_incoherence_v2fix_2026-02-13"
 
 from chaostrace.features.windowing import estimate_sample_hz
 from chaostrace.hybrid.metrics import event_level_metrics, pointwise_prf
 from chaostrace.orchestrator.sweep import SweepConfig, build_grid, sweep
+
+RUN_HYBRID_BUILD = "hybrid_incoherence_v2fix_2026-02-13"
+
 
 
 def _load_csv(path: str) -> pd.DataFrame:
