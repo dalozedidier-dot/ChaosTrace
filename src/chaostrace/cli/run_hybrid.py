@@ -233,6 +233,40 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--merge-gap-s", type=float, default=0.20)
     p.add_argument("--min-duration-s", type=float, default=0.30)
 
+
+    # Optional composite incoherence score (per timepoint, baseline-excess aggregated)
+    p.add_argument(
+        "--incoherence",
+        action="store_true",
+        help=(
+            "Add a composite incoherence score column (aggregated baseline-excess of component metrics). "
+            "This does not change alerting unless you explicitly use the column downstream."
+        ),
+    )
+    p.add_argument(
+        "--inco-weights",
+        default=None,
+        help=(
+            "Optional JSON dict of weights for incoherence components, e.g. "
+            "'{\"markov\":0.45,\"delta\":0.15,\"lyap\":0.15,\"rqa_break\":0.25}'. "
+            "Unknown keys are ignored. If omitted, uniform weights are used."
+        ),
+    )
+    p.add_argument(
+        "--inco-percentile",
+        type=float,
+        default=None,
+        help="Percentile for per-component baseline thresholds (default: --baseline-percentile).",
+    )
+    p.add_argument(
+        "--inco-only-chaos",
+        action="store_true",
+        help=(
+            "If set, incoherence uses only chaos sub-metrics (delta, markov, lyap, rqa_break, laminar_break) "
+            "and ignores optional MP/causal/DL components."
+        ),
+    )
+
     p.add_argument(
         "--pick",
         default="auto",
@@ -334,6 +368,130 @@ def _pick_best(grid_rows: List[Dict[str, Any]], mode: str) -> int:
     return int(best)
 
 
+
+def _robust_01(x: np.ndarray, *, p: float = 95.0) -> np.ndarray:
+    x = np.asarray(x, dtype=float)
+    x = np.abs(x)
+    with np.errstate(all="ignore"):
+        scale = float(np.nanpercentile(x, float(p))) if np.isfinite(x).any() else 0.0
+    if not np.isfinite(scale) or scale <= 1e-12:
+        return np.zeros_like(x, dtype=float)
+    return np.clip(x / scale, 0.0, 1.0)
+
+
+def _fill0(x: np.ndarray) -> np.ndarray:
+    x = np.asarray(x, dtype=float)
+    return np.where(np.isfinite(x), x, 0.0)
+
+
+def _compute_chaos_inco_components(df: pd.DataFrame, *, cfg: SweepConfig, window_n: int) -> Dict[str, np.ndarray]:
+    """Compute per-timepoint sub-metrics used to explain chaos incoherence.
+
+    Output components are scaled to [0, 1] and oriented so larger means 'more incoherent'.
+    """
+    # Local imports to keep CLI import light.
+    from chaostrace.analyzers.delta_stats import delta_stats
+    from chaostrace.analyzers.lyapunov_like import lyapunov_like
+    from chaostrace.analyzers.markov_drop import markov_drop
+    from chaostrace.analyzers.null_trace import null_trace
+    from chaostrace.analyzers.rqa_light import rqa_light
+
+    res_null = null_trace(df, col="foil_height_m", win=int(window_n), eps=0.01)
+    res_delta = delta_stats(df, a="boat_speed", b="foil_height_m")
+    res_markov = markov_drop(df, drop_threshold=float(cfg.drop_threshold))
+    res_rqa = rqa_light(df, col="boat_speed", dim=int(cfg.emb_dim), lag=int(cfg.emb_lag), eps=0.5)
+    res_lyap = lyapunov_like(df, col="boat_speed", dim=int(cfg.emb_dim), lag=int(cfg.emb_lag), max_t=20)
+
+    laminar = np.clip(_fill0(res_null.timeline["score"].to_numpy(dtype=float)), 0.0, 1.0)
+    delta01 = _robust_01(_fill0(res_delta.timeline["score"].to_numpy(dtype=float)))
+    markov01 = _robust_01(_fill0(res_markov.timeline["score"].to_numpy(dtype=float)))
+
+    rqa_det = res_rqa.metrics.get("det_proxy", float("nan"))
+    rqa_rr = res_rqa.metrics.get("rr", float("nan"))
+    rqa_inv = float(rqa_det) if np.isfinite(rqa_det) else float(rqa_rr)
+    if not np.isfinite(rqa_inv):
+        rqa_inv = 0.0
+    rqa_inv = float(np.clip(rqa_inv, 0.0, 1.0))
+    rqa_break = np.full(len(df), 1.0 - rqa_inv, dtype=float)
+
+    lyap_val = res_lyap.metrics.get("lyap_like", float("nan"))
+    lyap_abs = float(abs(lyap_val)) if np.isfinite(lyap_val) else 0.0
+    lyap01 = float(1.0 - np.exp(-lyap_abs))
+    lyap01 = float(np.clip(lyap01, 0.0, 1.0))
+    lyap_series = np.full(len(df), lyap01, dtype=float)
+
+    laminar_break = 1.0 - laminar
+
+    return {
+        "delta": delta01,
+        "markov": markov01,
+        "lyap": lyap_series,
+        "rqa_break": rqa_break,
+        "laminar_break": laminar_break,
+    }
+
+
+def _compute_incoherence_series(
+    components: Dict[str, np.ndarray],
+    baseline_mask: np.ndarray,
+    *,
+    weights: Optional[Dict[str, float]] = None,
+    percentile: float = 99.5,
+) -> Tuple[np.ndarray, Dict[str, float], Dict[str, float]]:
+    """Aggregate a composite incoherence series as baseline-excess.
+
+    inco[t] = sum_k w_k * max(0, comp_k[t] - thr_k)
+    where thr_k is a percentile computed on the baseline segment.
+    """
+    if not components:
+        return np.zeros(0, dtype=float), {}, {}
+
+    # Ensure consistent shape.
+    n = len(next(iter(components.values())))
+    for k, v in list(components.items()):
+        vv = np.asarray(v, dtype=float)
+        if vv.shape[0] != n:
+            raise ValueError(f"Incoherence component {k!r} has wrong length: {vv.shape[0]} != {n}")
+        components[k] = vv
+
+    keys = list(components.keys())
+
+    # Parse / normalize weights.
+    if weights is None:
+        w = {k: 1.0 / len(keys) for k in keys}
+    else:
+        w = {}
+        for k in keys:
+            try:
+                w[k] = float(weights.get(k, 0.0))
+            except Exception:
+                w[k] = 0.0
+        w = _renorm_weights(w)
+        # If all provided weights are 0, fall back to uniform.
+        if sum(w.values()) <= 1e-12:
+            w = {k: 1.0 / len(keys) for k in keys}
+
+    m = np.asarray(baseline_mask, dtype=bool)
+    if m.shape[0] != n:
+        raise ValueError("baseline_mask must have same length as components")
+
+    thr: Dict[str, float] = {}
+    for k in keys:
+        s = components[k]
+        base = s[m]
+        base = base[np.isfinite(base)]
+        ref = base if base.size else s[np.isfinite(s)]
+        thr[k] = float(np.percentile(ref, float(percentile))) if ref.size else 0.0
+
+    inco = np.zeros(n, dtype=float)
+    for k in keys:
+        inco += float(w.get(k, 0.0)) * np.maximum(0.0, components[k] - float(thr[k]))
+
+    inco = np.where(np.isfinite(inco), inco, 0.0)
+    return inco, thr, w
+
+
+
 def _fuse_components(
     score_chaos: np.ndarray,
     *,
@@ -431,6 +589,40 @@ def main(argv: Optional[List[str]] = None) -> int:
         )
 
         baseline_mask = (np.arange(len(df)) < baseline_n) & (~is_drop)
+    incoherence = None
+    inco_thresholds: Dict[str, float] = {}
+    inco_weights: Dict[str, float] = {}
+    inco_percentile = float(args.inco_percentile) if args.inco_percentile is not None else float(args.baseline_percentile)
+
+    if bool(args.incoherence):
+        # Build a richer component set than score_mean alone (delta/markov/lyap/RQA/laminar),
+        # then optionally add MP/causal/DL components when enabled.
+        inco_components = _compute_chaos_inco_components(df, cfg=cfg, window_n=win_n)
+
+        if not bool(args.inco_only_chaos):
+            if score_mp is not None:
+                inco_components["mp"] = np.asarray(score_mp, dtype=float)
+            if score_causal is not None:
+                inco_components["causal"] = np.asarray(score_causal, dtype=float)
+            if score_dl is not None:
+                inco_components["dl"] = np.asarray(score_dl, dtype=float)
+
+        user_w: Optional[Dict[str, float]] = None
+        if args.inco_weights is not None:
+            try:
+                w_raw = json.loads(str(args.inco_weights))
+                if isinstance(w_raw, dict):
+                    user_w = {str(k): float(v) for k, v in w_raw.items()}
+            except Exception:
+                user_w = None
+
+        incoherence, inco_thresholds, inco_weights = _compute_incoherence_series(
+            inco_components,
+            baseline_mask,
+            weights=user_w,
+            percentile=inco_percentile,
+        )
+
         thr = _dynamic_threshold(
             fused,
             baseline_mask,
@@ -575,16 +767,18 @@ def main(argv: Optional[List[str]] = None) -> int:
     outp.mkdir(parents=True, exist_ok=True)
 
     # Timeline CSV
-    out_df = pd.DataFrame(
-        {
-            "time_s": t,
-            "is_drop": is_drop.astype(int),
-            "score_chaos": np.asarray(score_chaos, dtype=float),
-            "score_fused": np.asarray(fused, dtype=float),
-            "threshold": float(thr),
-            "alert": alert.astype(int),
-        }
-    )
+    base_cols: Dict[str, Any] = {
+        "time_s": t,
+        "is_drop": is_drop.astype(int),
+        "score_chaos": np.asarray(score_chaos, dtype=float),
+        "score_fused": np.asarray(fused, dtype=float),
+        "threshold": float(thr),
+        "alert": alert.astype(int),
+    }
+    if incoherence is not None:
+        base_cols["incoherence"] = np.asarray(incoherence, dtype=float)
+
+    out_df = pd.DataFrame(base_cols)
     for k, v in components.items():
         if k == "chaos":
             continue
@@ -607,6 +801,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         "baseline_s": float(args.baseline_s),
         "baseline_frac": float(args.baseline_frac),
         "baseline_percentile": float(args.baseline_percentile),
+        "incoherence_enabled": bool(args.incoherence),
+        "inco_only_chaos": bool(args.inco_only_chaos),
+        "inco_percentile": float(inco_percentile),
+        "inco_weights": inco_weights,
+        "inco_thresholds": inco_thresholds,
+
         "threshold": float(thr),
         "threshold_min": float(args.threshold_min),
         "threshold_max": float(args.threshold_max),
@@ -644,6 +844,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             row = {
                 "time_s": float(t[int(i)]),
                 "score_fused": float(fused[int(i)]),
+                "incoherence": float(incoherence[int(i)]) if incoherence is not None else None,
                 "threshold": float(thr),
                 "weights": weights,
                 "components": {k: float(np.asarray(v, dtype=float)[int(i)]) for k, v in components.items()},

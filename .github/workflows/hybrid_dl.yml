@@ -88,7 +88,8 @@ jobs:
             --threshold-max 0.97 \
             --gate-dl 0.05 \
             --merge-gap-s 0.30 \
-            --min-duration-s 0.15
+            --min-duration-s 0.15 \
+            --incoherence
 
       - name: Emit manifest (hybrid_dl)
         if: always()

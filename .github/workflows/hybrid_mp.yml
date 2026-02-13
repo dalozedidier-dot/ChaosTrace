@@ -42,7 +42,8 @@ jobs:
             --enable-mp \
             --require-mp \
             --mp-col boat_speed \
-            --pick max_f1_event
+            --pick max_f1_event \
+            --incoherence
 
       - name: Assert MP active
         run: |
