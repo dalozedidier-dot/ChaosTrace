@@ -1,0 +1,282 @@
+name: incoherence_expected
+
+on:
+  workflow_dispatch:
+    inputs:
+      input_csv:
+        description: "CSV d'entrée"
+        required: false
+        default: "test_data/sample_timeseries_1_2_drops.csv"
+      vars:
+        description: "Variables physiques (colonnes CSV) séparées par des virgules"
+        required: false
+        default: "foil_height_m,boat_speed,wind_shear,wave_height"
+      runs:
+        description: "Nombre de runs sweep"
+        required: false
+        default: "3"
+      seed:
+        description: "Seed RNG"
+        required: false
+        default: "7"
+      priority:
+        description: "Priorité d'affichage quand les deux existent"
+        required: false
+        type: choice
+        options:
+          - by_variable
+          - vector_field
+        default: "by_variable"
+      knn_k:
+        description: "K voisins pour gradient local"
+        required: false
+        default: "25"
+      max_eval_points:
+        description: "Sous échantillonnage gradient (0 = full)"
+        required: false
+        default: "300"
+      max_points_3d:
+        description: "Max points affichés en 3D (subsampling uniforme)"
+        required: false
+        default: "8000"
+      sphere:
+        description: "Ajouter les vues unit sphere"
+        required: false
+        default: "true"
+      sphere_surface:
+        description: "Surface sphère translucide (si sphere=true)"
+        required: false
+        default: "true"
+      time_path:
+        description: "Relier les points dans l ordre temporel"
+        required: false
+        default: "true"
+      time_path_mode:
+        description: "Trajectoire 3D: level (segments colorés) ou single (ligne grise)"
+        required: false
+        default: "level"
+      export_png:
+        description: "Exporter aussi des PNG Plotly (kaleido)"
+        required: false
+        default: "true"
+      max_vectors:
+        description: "Nombre max de flèches (cones) champ de vecteurs"
+        required: false
+        default: "900"
+      show_points:
+        description: "Afficher aussi les points de contexte dans le champ de vecteurs"
+        required: false
+        default: "true"
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    env:
+      OMP_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      PYTHONHASHSEED: "${{ inputs.seed }}"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: |
+          set -euo pipefail
+          python -m pip install -U pip
+          pip install -e ".[dev]"
+          pip install plotly kaleido
+
+      - name: Run sweep
+        run: |
+          set -euo pipefail
+          mkdir -p _ci_out/incoherence_expected
+          python -m chaostrace.cli.run_sweep             --input "${{ inputs.input_csv }}"             --out _ci_out/incoherence_expected             --runs "${{ inputs.runs }}"             --seed "${{ inputs.seed }}"
+
+      - name: Build incoherence vectors + plots by variable (all run_id)
+        run: |
+          set -euo pipefail
+
+          SPHERE_FLAGS=""
+          if [ "${{ inputs.sphere }}" = "true" ]; then SPHERE_FLAGS="$SPHERE_FLAGS --sphere"; fi
+          if [ "${{ inputs.sphere_surface }}" = "true" ]; then SPHERE_FLAGS="$SPHERE_FLAGS --sphere-surface"; fi
+
+          TP_FLAGS="--no-time-path"
+          if [ "${{ inputs.time_path }}" = "true" ]; then TP_FLAGS="--time-path"; fi
+
+          PNG_FLAG=""
+          if [ "${{ inputs.export_png }}" = "true" ]; then PNG_FLAG="--export-png"; fi
+
+          python scripts/viz_incoherence.py $SPHERE_FLAGS $TP_FLAGS $PNG_FLAG             --time-path-mode "${{ inputs.time_path_mode }}"             --run-dir _ci_out/incoherence_expected             --input "${{ inputs.input_csv }}"             --vars "${{ inputs.vars }}"             --out _ci_out/incoherence_expected/viz_incoherence             --knn-k "${{ inputs.knn_k }}"             --max-eval-points "${{ inputs.max_eval_points }}"             --max-points-3d "${{ inputs.max_points_3d }}"             --copy-best
+
+      - name: Build vector field (cones) on best run (and keep all other outputs)
+        run: |
+          set -euo pipefail
+
+          VF_FLAGS=""
+          if [ "${{ inputs.sphere }}" = "true" ]; then VF_FLAGS="$VF_FLAGS --sphere"; fi
+          if [ "${{ inputs.sphere_surface }}" = "true" ]; then VF_FLAGS="$VF_FLAGS --sphere-surface"; fi
+          if [ "${{ inputs.show_points }}" = "true" ]; then VF_FLAGS="$VF_FLAGS --show-points"; fi
+
+          python scripts/viz_vector_field.py $VF_FLAGS             --viz-dir _ci_out/incoherence_expected/viz_incoherence             --max-vectors "${{ inputs.max_vectors }}"
+
+      - name: Build expected dashboard (priority + profile)
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from __future__ import annotations
+
+          import json
+          import os
+          from pathlib import Path
+          import html as _html
+
+          out_dir = Path("_ci_out/incoherence_expected/viz_incoherence")
+          out_dir.mkdir(parents=True, exist_ok=True)
+
+          priority = os.environ.get("PRIORITY", "").strip() or "${{ inputs.priority }}"
+          vars_csv = "${{ inputs.vars }}"
+          vars_list = [v.strip() for v in vars_csv.split(",") if v.strip()]
+
+          best_run_txt = out_dir / "best_run.txt"
+          best_run = best_run_txt.read_text(encoding="utf-8").strip() if best_run_txt.exists() else "run_1"
+          best_dir = out_dir / "best"
+          vf_dir = out_dir / best_run / "vectorfield"
+
+          def rel(p: Path) -> str:
+            try:
+              return str(p.relative_to(out_dir)).replace(os.sep, "/")
+            except Exception:
+              return p.name
+
+          # Collect key outputs
+          byvar = []
+          if best_dir.exists():
+            for v in vars_list:
+              byvar.append((f"Incoherence {v} (png)", rel(best_dir / f"incoherence_{v}.png")))
+              byvar.append((f"Embedding 3D {v} (html)", rel(best_dir / f"incoherence_embedding_3d_{v}.html")))
+            byvar.append(("Embedding 3D global (html)", rel(best_dir / "incoherence_embedding_3d_global.html")))
+            byvar.append(("Vectors (csv)", rel(best_dir / "incoherence_vectors.csv")))
+            byvar.append(("Summary (csv)", rel(best_dir / "incoherence_summary.csv")))
+            byvar.append(("Best meta (json)", rel(best_dir / "run_meta.json")))
+            byvar.append(("Best from (txt)", rel(best_dir / "BEST_FROM.txt")))
+
+          vfield = []
+          if vf_dir.exists():
+            vfield.append(("Vector field global (html)", rel(vf_dir / "incoherence_vectorfield_3d_global.html")))
+            for v in vars_list:
+              vfield.append((f"Vector field {v} (html)", rel(vf_dir / f"incoherence_vectorfield_3d_{v}.html")))
+
+          # Profile JSON
+          profile = {
+            "kind": "incoherence_expected",
+            "priority": priority,
+            "best_run": best_run,
+            "vars": vars_list,
+            "has_best": best_dir.exists(),
+            "has_vectorfield": vf_dir.exists(),
+            "outputs": {
+              "by_variable": [href for _, href in byvar],
+              "vector_field": [href for _, href in vfield],
+            },
+          }
+          (out_dir / "viz_profile.json").write_text(json.dumps(profile, indent=2, sort_keys=True), encoding="utf-8")
+
+          profile_html = f"""<!doctype html>
+          <html lang=\"fr\"><head><meta charset=\"utf-8\" />
+          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
+          <title>Viz profile</title>
+          <style>body{margin:0;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Arial,sans-serif;background:#0b0d12;color:#eaeef7;} .wrap{max-width:1100px;margin:0 auto;padding:26px 18px 60px;} .card{background:#101522;border:1px solid #1d2740;border-radius:14px;padding:14px 14px;margin:12px 0;} table{width:100%;border-collapse:collapse;} td{padding:8px 10px;border-bottom:1px solid #1d2740;vertical-align:top;} td.k{width:260px;color:#c9d3ea;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:12px;} a{color:#9dc1ff;text-decoration:none;} a:hover{text-decoration:underline;} pre{background:#0f1422;border:1px solid #1d2740;border-radius:12px;padding:12px;overflow:auto;}</style>
+          </head><body><div class=\"wrap\"><h1 style=\"font-size:22px;margin:0 0 8px;\">Viz profile</h1>
+          <div style=\"color:#a8b0c2;font-size:13px;margin-bottom:18px;\">Incoherence expected: capacités, best run, outputs.</div>
+          <div class=\"card\"><table>
+          <tr><td class=\"k\">priority</td><td>{_html.escape(priority)}</td></tr>
+          <tr><td class=\"k\">best_run</td><td>{_html.escape(best_run)}</td></tr>
+          <tr><td class=\"k\">vars</td><td>{_html.escape(', '.join(vars_list) or '-')}</td></tr>
+          <tr><td class=\"k\">has_best</td><td>{best_dir.exists()}</td></tr>
+          <tr><td class=\"k\">has_vectorfield</td><td>{vf_dir.exists()}</td></tr>
+          </table></div>
+          <div class=\"card\"><h2 style=\"font-size:16px;margin:0 0 10px;\">Liens</h2>
+          <ul><li><a href=\"index.html\">Retour dashboard</a></li><li><a href=\"viz_profile.json\">viz_profile.json</a></li></ul></div>
+          <div class=\"card\"><h2 style=\"font-size:16px;margin:0 0 10px;\">Raw JSON</h2><pre>{_html.escape(json.dumps(profile, indent=2, sort_keys=True))}</pre></div>
+          </div></body></html>"""
+          (out_dir / "viz_profile.html").write_text(profile_html, encoding="utf-8")
+
+
+          def _section(title: str, items: list[tuple[str,str]]) -> str:
+            if not items:
+              return f"<div class='empty'>Aucun fichier trouvé pour { _html.escape(title) }.</div>"
+            lis = "".join([f"<li><a href='{_html.escape(h)}'>{_html.escape(t)}</a></li>" for t,h in items])
+            return f"<h2>{_html.escape(title)}</h2><ul>{lis}</ul>"
+
+          # Priority ordering: do not hide anything, only order.
+          if priority == "vector_field":
+            first = _section("À regarder d'abord: champ de vecteurs", vfield)
+            second = _section("Ensuite: incohérence par variable", byvar)
+          else:
+            first = _section("À regarder d'abord: incohérence par variable", byvar)
+            second = _section("Ensuite: champ de vecteurs", vfield)
+
+          prof_link = "viz_profile.html"
+          html = f"""<!doctype html>
+          <html lang="fr">
+          <head>
+            <meta charset="utf-8" />
+            <meta name="viewport" content="width=device-width, initial-scale=1" />
+            <title>Incoherence expected</title>
+            <style>
+              body {{ margin:0; font-family: -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Arial, sans-serif; background:#0b0d12; color:#eaeef7; }}
+              .wrap {{ max-width: 1120px; margin: 0 auto; padding: 26px 18px 60px; }}
+              h1 {{ font-size: 22px; margin: 0 0 8px; }}
+              .sub {{ color:#a8b0c2; font-size: 13px; margin-bottom: 18px; }}
+              .card {{ background:#101522; border:1px solid #1d2740; border-radius:14px; padding: 14px 14px; margin: 12px 0; }}
+              a {{ color:#9dc1ff; text-decoration:none; }}
+              a:hover {{ text-decoration:underline; }}
+              ul {{ margin: 10px 0 0 18px; }}
+              li {{ margin: 6px 0; }}
+              .meta {{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 12px; color:#c9d3ea; }}
+              .empty {{ color:#ffd0cf; }}
+            </style>
+          </head>
+          <body>
+            <div class="wrap">
+              <h1>Incoherence expected</h1>
+              <div class="sub">Tous les graphes sont conservés. Seule la priorité d'affichage change. Best run: <span class="meta">{_html.escape(best_run)}</span></div>
+
+              <div class="card">
+                <div class="meta">Priority: {_html.escape(priority)}. Vars: {_html.escape(", ".join(vars_list) or "-")}</div>
+                <div style="margin-top:10px;"><a href="{_html.escape(prof_link)}">Profil de rendu</a></div>
+              </div>
+
+              <div class="card">{first}</div>
+              <div class="card">{second}</div>
+
+              <div class="card">
+                <h2>Tout le dossier</h2>
+                <ul>
+                  <li><a href="{_html.escape(rel(best_dir))}">best/</a></li>
+                  <li><a href="{_html.escape(rel(out_dir / best_run))}">{_html.escape(best_run)}/</a></li>
+                </ul>
+              </div>
+            </div>
+          </body>
+          </html>
+          """
+          (out_dir / "index.html").write_text(html, encoding="utf-8")
+          PY
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: incoherence_expected_run${{ github.run_id }}_a${{ github.run_attempt }}
+          path: _ci_out/incoherence_expected/

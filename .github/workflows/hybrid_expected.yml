@@ -1,0 +1,204 @@
+name: hybrid_expected
+
+on:
+  workflow_dispatch:
+    inputs:
+      seed:
+        description: "Seed RNG"
+        required: false
+        default: "7"
+      runs:
+        description: "Nombre de configs évaluées"
+        required: false
+        default: "40"
+      input_csv:
+        description: "CSV d'entrée (laisser vide pour générer un dataset early-warning)"
+        required: false
+        default: ""
+      priority:
+        description: "Priorité d'affichage quand les deux existent"
+        required: false
+        type: choice
+        options:
+          - lead_time
+          - false_positives
+        default: "lead_time"
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    env:
+      OMP_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      PYTHONHASHSEED: "${{ inputs.seed }}"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: |
+          set -euo pipefail
+          python -m pip install -U pip
+          pip install -e ".[dev]"
+          python -c "import numpy, pandas" >/dev/null
+
+      - name: Prepare input dataset
+        run: |
+          set -euo pipefail
+          mkdir -p _ci_out/hybrid_expected/datasets
+          if [ -n "${{ inputs.input_csv }}" ]; then
+            echo "${{ inputs.input_csv }}" > _ci_out/hybrid_expected/datasets/INPUT_PATH.txt
+          else
+            python scripts/generate_sailgp_synth.py               --profile drops               --seed "${{ inputs.seed }}"               --pre-drop-s 2.0               --pre-drop-depth 0.12               --out _ci_out/hybrid_expected/datasets/sample_timeseries_earlywarning.csv
+            echo "_ci_out/hybrid_expected/datasets/sample_timeseries_earlywarning.csv" > _ci_out/hybrid_expected/datasets/INPUT_PATH.txt
+          fi
+
+      - name: Run hybrid selection (lead time and false positives)
+        run: |
+          set -euo pipefail
+          INPUT=$(cat _ci_out/hybrid_expected/datasets/INPUT_PATH.txt)
+          mkdir -p _ci_out/hybrid_expected/lead_time _ci_out/hybrid_expected/false_positives
+
+          python -m chaostrace.cli.run_hybrid             --input "$INPUT"             --out _ci_out/hybrid_expected/lead_time             --runs "${{ inputs.runs }}"             --seed "${{ inputs.seed }}"             --pick max_ew             --early-window-s 2.0             --baseline-s 10.0             --baseline-percentile 99.5             --threshold-min 0.40             --threshold-max 0.97             --merge-gap-s 0.30             --min-duration-s 0.15             --incoherence
+
+          python -m chaostrace.cli.run_hybrid             --input "$INPUT"             --out _ci_out/hybrid_expected/false_positives             --runs "${{ inputs.runs }}"             --seed "${{ inputs.seed }}"             --pick min_fp             --baseline-s 10.0             --baseline-percentile 99.5             --threshold-min 0.40             --threshold-max 0.97             --merge-gap-s 0.30             --min-duration-s 0.15             --incoherence
+
+      - name: Build expected dashboard (priority + profile)
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from __future__ import annotations
+
+          import json
+          import os
+          from pathlib import Path
+          import html as _html
+
+          root = Path("_ci_out/hybrid_expected")
+          prio = os.environ.get("PRIORITY", "").strip() or "${{ inputs.priority }}"
+          lead_dir = root / "lead_time"
+          fp_dir = root / "false_positives"
+
+          def load_metrics(d: Path) -> dict:
+            p = d / "metrics_hybrid.json"
+            if not p.exists():
+              return {}
+            return json.loads(p.read_text(encoding="utf-8"))
+
+          m_lead = load_metrics(lead_dir)
+          m_fp = load_metrics(fp_dir)
+
+          profile = {
+            "kind": "hybrid_expected",
+            "priority": prio,
+            "dirs": {
+              "lead_time": "lead_time",
+              "false_positives": "false_positives",
+            },
+            "lead_time_metrics": m_lead,
+            "false_positive_metrics": m_fp,
+          }
+          (root / "viz_profile.json").write_text(json.dumps(profile, indent=2, sort_keys=True), encoding="utf-8")
+
+          profile_html = f"""<!doctype html>
+          <html lang=\"fr\"><head><meta charset=\"utf-8\" />
+          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
+          <title>Viz profile</title>
+          <style>body{margin:0;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Arial,sans-serif;background:#0b0d12;color:#eaeef7;} .wrap{max-width:1100px;margin:0 auto;padding:26px 18px 60px;} .card{background:#101522;border:1px solid #1d2740;border-radius:14px;padding:14px 14px;margin:12px 0;} table{width:100%;border-collapse:collapse;} td{padding:8px 10px;border-bottom:1px solid #1d2740;vertical-align:top;} td.k{width:260px;color:#c9d3ea;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:12px;} a{color:#9dc1ff;text-decoration:none;} a:hover{text-decoration:underline;} pre{background:#0f1422;border:1px solid #1d2740;border-radius:12px;padding:12px;overflow:auto;}</style>
+          </head><body><div class=\"wrap\"><h1 style=\"font-size:22px;margin:0 0 8px;\">Viz profile</h1>
+          <div style=\"color:#a8b0c2;font-size:13px;margin-bottom:18px;\">Hybrid expected: deux sélections, mêmes données, pick différents.</div>
+          <div class=\"card\"><table>
+          <tr><td class=\"k\">priority</td><td>{_html.escape(prio)}</td></tr>
+          <tr><td class=\"k\">lead_time_dir</td><td><a href=\"lead_time/\">lead_time/</a></td></tr>
+          <tr><td class=\"k\">false_positives_dir</td><td><a href=\"false_positives/\">false_positives/</a></td></tr>
+          </table></div>
+          <div class=\"card\"><ul><li><a href=\"index.html\">Retour dashboard</a></li><li><a href=\"viz_profile.json\">viz_profile.json</a></li></ul></div>
+          <div class=\"card\"><h2 style=\"font-size:16px;margin:0 0 10px;\">Raw JSON</h2><pre>{_html.escape(json.dumps(profile, indent=2, sort_keys=True, ensure_ascii=False))}</pre></div>
+          </div></body></html>"""
+          (root / "viz_profile.html").write_text(profile_html, encoding="utf-8")
+
+
+          def metric_row(k: str, v) -> str:
+            return f"<tr><td class='k'>{_html.escape(k)}</td><td class='v'>{_html.escape(str(v))}</td></tr>"
+
+          def render_metrics(title: str, m: dict, primary: list[str]) -> str:
+            if not m:
+              return f"<div class='empty'>Pas de metrics_hybrid.json pour { _html.escape(title) }.</div>"
+            rows = []
+            shown = set()
+            for k in primary:
+              if k in m:
+                rows.append(metric_row(k, m.get(k)))
+                shown.add(k)
+            # Add a few core keys if present
+            for k in ["f1_event","lead_s_max","alert_events","alert_frac","precision","recall","f1","fp"]:
+              if k in m and k not in shown:
+                rows.append(metric_row(k, m.get(k)))
+                shown.add(k)
+            return f"<h2>{_html.escape(title)}</h2><table>{''.join(rows)}</table><div style='margin-top:10px;'><a href='{_html.escape(title.lower().replace(' ','_'))}/metrics_hybrid.json'>metrics_hybrid.json</a> | <a href='{_html.escape(title.lower().replace(' ','_'))}/anomalies_hybrid.csv'>anomalies_hybrid.csv</a></div>"
+
+          # Ordering by priority, without hiding anything.
+          if prio == "false_positives":
+            first = render_metrics("False positives", m_fp, primary=["fp","alert_events","alert_frac","precision"])
+            second = render_metrics("Lead time", m_lead, primary=["lead_s_max","lead_s_median","f1_event","alert_event_precision"])
+          else:
+            first = render_metrics("Lead time", m_lead, primary=["lead_s_max","lead_s_median","f1_event","alert_event_precision"])
+            second = render_metrics("False positives", m_fp, primary=["fp","alert_events","alert_frac","precision"])
+
+          html = f"""<!doctype html>
+          <html lang="fr">
+          <head>
+            <meta charset="utf-8" />
+            <meta name="viewport" content="width=device-width, initial-scale=1" />
+            <title>Hybrid expected</title>
+            <style>
+              body {{ margin:0; font-family: -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Arial, sans-serif; background:#0b0d12; color:#eaeef7; }}
+              .wrap {{ max-width: 1120px; margin: 0 auto; padding: 26px 18px 60px; }}
+              h1 {{ font-size: 22px; margin: 0 0 8px; }}
+              .sub {{ color:#a8b0c2; font-size: 13px; margin-bottom: 18px; }}
+              .card {{ background:#101522; border:1px solid #1d2740; border-radius:14px; padding: 14px 14px; margin: 12px 0; }}
+              table {{ width: 100%; border-collapse: collapse; }}
+              td {{ padding: 8px 10px; border-bottom: 1px solid #1d2740; vertical-align: top; }}
+              td.k {{ width: 260px; color: #c9d3ea; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 12px; }}
+              td.v {{ color: #eaeef7; word-break: break-word; }}
+              a {{ color:#9dc1ff; text-decoration:none; }}
+              a:hover {{ text-decoration:underline; }}
+              .meta {{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 12px; color:#c9d3ea; }}
+              .empty {{ color:#ffd0cf; }}
+            </style>
+          </head>
+          <body>
+            <div class="wrap">
+              <h1>Hybrid expected</h1>
+              <div class="sub">Deux sélections sont produites. Seule la priorité d'affichage change. Priority: <span class="meta">{_html.escape(prio)}</span></div>
+
+              <div class="card">
+                <div style="margin-bottom:8px;"><a href="viz_profile.html">Profil de rendu</a></div>
+                <div class="meta">Dossiers: <a href="lead_time/">lead_time</a> | <a href="false_positives/">false_positives</a></div>
+              </div>
+
+              <div class="card">{first}</div>
+              <div class="card">{second}</div>
+            </div>
+          </body>
+          </html>
+          """
+          (root / "index.html").write_text(html, encoding="utf-8")
+          PY
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hybrid_expected_run${{ github.run_id }}_a${{ github.run_attempt }}
+          path: _ci_out/hybrid_expected/
