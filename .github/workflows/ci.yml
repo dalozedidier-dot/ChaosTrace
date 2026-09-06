@@ -30,6 +30,7 @@ jobs:
           set -euo pipefail
           python -m pip install -U pip
           pip install -e ".[dev]"
+          python -c "import importlib.metadata as m; print('ruff', m.version('ruff')); import chaostrace; print('chaostrace', chaostrace.__version__)"
 
       - name: Lint (ruff)
         run: |

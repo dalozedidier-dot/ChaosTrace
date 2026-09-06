@@ -1,3 +1,13 @@
+# Changelog
+
+## Unreleased
+
+- Pin Ruff to `>=0.6.9,<0.7` so CI does not drift onto a newer rule set.
+- Expose `chaostrace.__version__` (`0.2.7`).
+- Add console scripts: `chaostrace-sweep`, `chaostrace-hybrid`, `chaostrace-train`.
+- Add `streamlit` to the optional `viz` extra used by `app.py`.
+- Print installed Ruff / package versions in CI.
+
 ## 0.2.5
 
 - Early-warning DL: train on *drop onset* targets (predict the start of a drop, not the full drop segment), reducing label leakage and improving lead time.
@@ -13,25 +23,26 @@
 - Relax fusion threshold clamp (allow earlier alerts) and export alert_frac/threshold in metrics
 - Ruff: ignore E401 in notebooks
 
-# Changelog
+## 0.2.3 (2026-02-09)
+
+- Packaging: remove __pycache__ and .pytest_cache from bundle, keep repo clean.
+- Remove duplicate experimental `chaostrace.dl` package (hybrid DL lives under `chaostrace.hybrid.dl`).
+- Add tests to ensure hybrid CLI/modules import without optional extras (torch, stumpy).
+
 ## 0.2.2
+
 - Fix CI ruff error (unused import) in hybrid Matrix Profile module.
 - Add optional DL subpackage (chaostrace.hybrid.dl) with minimal training/inference pipeline.
 - Fix train_hybrid/run_hybrid imports and make DL truly optional via extras.
 - Remove __pycache__ artifacts from distribution.
 
-## 0.2.3 (2026-02-09)
-- Packaging: remove __pycache__ and .pytest_cache from bundle, keep repo clean.
-- Remove duplicate experimental `chaostrace.dl` package (hybrid DL lives under `chaostrace.hybrid.dl`).
-- Add tests to ensure hybrid CLI/modules import without optional extras (torch, stumpy).
-
-
-
 ## 0.2.1
+
 - Fix: add missing hybrid modules (matrix_profile, causal drift proxy, metrics) and make chaostrace.hybrid a real package.
 - Hybrid CLI run_hybrid now runs end-to-end without optional deps unless enabled.
 
 ## 0.2.0
+
 - Ajout du mode hybride (fusion chaos + options ML)
 - Ajout des CLI `run_hybrid` et `train_hybrid`
 - Seuil dynamique + post-traitement event-level pour réduire les faux positifs
@@ -39,4 +50,5 @@
 - Ajout Matrix Profile (optionnel) et drift causal VAR(1)
 
 ## 0.1.0
+
 - Scaffold initial
