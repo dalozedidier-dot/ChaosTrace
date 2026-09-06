@@ -1,8 +1,13 @@
 # ChaosTrace
 
+[![ci](https://github.com/dalozedidier-dot/ChaosTrace/actions/workflows/ci.yml/badge.svg)](https://github.com/dalozedidier-dot/ChaosTrace/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 ChaosTrace est un toolkit léger basé sur des signaux de chaos (Takens, RQA, Lyapunov proxy) pour détecter des transitions de régime et des événements de type foil drop dans des séries temporelles multivariées.
 
 Cette version ajoute un mode hybride, conçu pour augmenter précision et recall tout en gardant l'interprétabilité par les signaux chaos.
+
+Package version: `0.2.7` (`import chaostrace; chaostrace.__version__`).
 
 ## Installation
 
@@ -22,11 +27,19 @@ pip install -e ".[mp]"
 pip install -e ".[dl]"
 ```
 
+- UI Streamlit / Plotly :
+```bash
+pip install -e ".[viz]"
+```
+
+Après installation, les commandes `chaostrace-sweep`, `chaostrace-hybrid` et `chaostrace-train` sont disponibles. `python -m chaostrace.cli.*` continue de fonctionner.
+
 ## Usage
 
 ### Sweep chaos (core)
 ```bash
 python -m chaostrace.cli.run_sweep --input test_data/sample_timeseries.csv --out _ci_out/run
+# équivalent : chaostrace-sweep --input test_data/sample_timeseries.csv --out _ci_out/run
 ```
 
 Fichiers générés :
