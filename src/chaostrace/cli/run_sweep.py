@@ -4,14 +4,12 @@ import argparse
 from dataclasses import asdict
 from pathlib import Path
 
-import matplotlib.pyplot as plt
 import numpy as np
-import pandas as pd
 
 from chaostrace.data.ingest import load_timeseries
 from chaostrace.orchestrator.sweep import ALERT_THRESHOLD, build_grid, sweep
-from chaostrace.phase.embedding import takens_embedding
 from chaostrace.utils.manifest import write_manifest
+from chaostrace.viz.static import save_phase, save_timeline
 
 
 def _parse_list_floats(s: str) -> list[float]:
@@ -20,94 +18,6 @@ def _parse_list_floats(s: str) -> list[float]:
 
 def _parse_list_ints(s: str) -> list[int]:
     return [int(x.strip()) for x in s.split(",") if x.strip()]
-
-
-def _norm01(x: np.ndarray) -> np.ndarray:
-    x = np.asarray(x, dtype=float)
-    lo = float(np.nanmin(x))
-    hi = float(np.nanmax(x))
-    if not np.isfinite(lo) or not np.isfinite(hi) or hi - lo <= 1e-12:
-        return np.zeros_like(x, dtype=float)
-    return (x - lo) / (hi - lo)
-
-
-def _save_timeline(df: pd.DataFrame, tl: pd.DataFrame, outp: Path, *, threshold: float) -> tuple[Path, Path]:
-    fig, ax1 = plt.subplots()
-    t = df["time_s"].to_numpy(dtype=float)
-
-    foil = df.get("foil_height_m", pd.Series(np.zeros(len(df)))).to_numpy(dtype=float)
-    speed = df.get("boat_speed", pd.Series(np.zeros(len(df)))).to_numpy(dtype=float)
-
-    ax1.plot(t, foil, label="foil_height_m")
-    ax1.plot(t, speed, label="boat_speed")
-    ax1.set_xlabel("time_s")
-    ax1.set_ylabel("signals")
-
-    ax2 = ax1.twinx()
-    ax2.plot(t, tl["score_mean"].to_numpy(dtype=float), label="score_mean")
-    ax2.axhline(float(threshold), linestyle=":")
-    ax2.set_ylabel("score")
-
-    lines = ax1.get_lines() + ax2.get_lines()
-    labels = [ln.get_label() for ln in lines]
-    ax1.legend(lines, labels, loc="upper right")
-    fig.tight_layout()
-    p1 = outp / "fig_timeline.png"
-    fig.savefig(p1, dpi=150)
-    plt.close(fig)
-
-    fig, ax = plt.subplots()
-    foil_n = _norm01(foil)
-    speed_n = _norm01(speed)
-    inv = tl["score_invariant"].to_numpy(dtype=float)
-    var = tl["score_variant"].to_numpy(dtype=float)
-
-    ax.plot(t, foil_n, label="foil_norm")
-    ax.plot(t, speed_n, label="speed_norm")
-    ax.plot(t, inv, linewidth=3, label="score_invariant")
-    ax.plot(t, var, linestyle="--", label="score_variant")
-
-    inv_zone = inv > 0.6
-    var_zone = (var > 0.5) & (inv < 0.4)
-    ax.fill_between(t, 0.0, 1.0, where=inv_zone, alpha=0.08, label="invariant_zone")
-    ax.fill_between(t, 0.0, 1.0, where=var_zone, alpha=0.10, label="variant_zone")
-
-    ax.axhline(float(threshold), linestyle=":")
-    ax.set_xlabel("time_s")
-    ax.set_ylim(-0.05, 1.05)
-    ax.legend(loc="upper right")
-    fig.tight_layout()
-    p2 = outp / "fig_timeline_inv_var.png"
-    fig.savefig(p2, dpi=150)
-    plt.close(fig)
-
-    return p1, p2
-
-
-def _save_phase(df: pd.DataFrame, tl: pd.DataFrame, outp: Path, *, threshold: float) -> Path:
-    x = df.get("boat_speed", pd.Series(np.zeros(len(df)))).to_numpy(dtype=float)
-    X = takens_embedding(x, dim=3, lag=3)
-    if len(X) == 0:
-        fig = plt.figure()
-        p = outp / "fig_phase.png"
-        fig.savefig(p, dpi=150)
-        plt.close(fig)
-        return p
-
-    score = tl["score_mean"].to_numpy(dtype=float)
-    score = score[-len(X) :]
-    hi = score > float(threshold)
-
-    fig = plt.figure()
-    ax = fig.add_subplot(111, projection="3d")
-    ax.scatter(X[~hi, 0], X[~hi, 1], X[~hi, 2], s=3, alpha=0.5, c="0.6")
-    ax.scatter(X[hi, 0], X[hi, 1], X[hi, 2], s=6, alpha=0.9, c="red")
-    ax.set_title("Phase space (Takens embedding)")
-    fig.tight_layout()
-    p = outp / "fig_phase.png"
-    fig.savefig(p, dpi=150)
-    plt.close(fig)
-    return p
 
 
 def main() -> None:
@@ -154,8 +64,8 @@ def main() -> None:
     else:
         threshold = float(ALERT_THRESHOLD)
 
-    _save_phase(df, tl, outp, threshold=threshold)
-    _save_timeline(df, tl, outp, threshold=threshold)
+    save_phase(df, tl, outp, threshold=threshold)
+    save_timeline(df, tl, outp, threshold=threshold)
 
     manifest_params = {
         "input": args.input,
